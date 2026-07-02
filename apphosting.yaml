@@ -26,3 +26,8 @@ env:
     availability:
       - BUILD
       - RUNTIME
+  # 伺服器端 secret（透過 Cloud Secret Manager）
+  - variable: ANTHROPIC_API_KEY
+    secret: ANTHROPIC_API_KEY
+  - variable: GOOGLE_MAPS_API_KEY
+    secret: GOOGLE_MAPS_API_KEY
