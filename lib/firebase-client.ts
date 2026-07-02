@@ -8,6 +8,7 @@ import {
   indexedDBLocalPersistence,
   GoogleAuthProvider,
   getAuth,
+  type Auth,
 } from "firebase/auth";
 
 const config = {
@@ -17,19 +18,10 @@ const config = {
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 };
 
-// ⚠️ Guard: Firebase client SDK 只能在瀏覽器初始化。
-// Next.js build 時會在 server side prerender "use client" 頁面，
-// 此時 window 不存在，若直接 initializeApp 會因為缺少 API key 而 throw。
-// 用 lazy init + typeof window 防護解決這個問題。
-
-let _auth: ReturnType<typeof getAuth> | null = null;
-
-function initFirebase() {
-  if (typeof window === "undefined") return; // server-side guard
-  if (_auth) return; // already initialized
+function createAuth(): Auth {
   const app = getApps().length ? getApp() : initializeApp(config);
   try {
-    _auth = initializeAuth(app, {
+    return initializeAuth(app, {
       persistence: [
         indexedDBLocalPersistence,
         browserLocalPersistence,
@@ -38,17 +30,17 @@ function initFirebase() {
       ],
     });
   } catch {
-    // initializeAuth 只能呼叫一次（HMR 重複載入時會丟錯），退回 getAuth 取得既有 instance
-    _auth = getAuth(app);
+    // initializeAuth 只能呼叫一次，HMR 重複載入時退回 getAuth
+    return getAuth(app);
   }
 }
 
-// Proxy object that initializes Firebase lazily on first access
-export const auth = new Proxy({} as ReturnType<typeof getAuth>, {
-  get(_target, prop) {
-    initFirebase();
-    return (_auth as ReturnType<typeof getAuth>)[prop as keyof ReturnType<typeof getAuth>];
-  },
-});
+// ⚠️ 只在瀏覽器環境初始化 Firebase。
+// Next.js build 時會在 server side 執行 "use client" 模組，
+// typeof window 防護讓 server side 不呼叫 initializeApp，
+// 避免 NEXT_PUBLIC_* 未設定時 throw auth/invalid-api-key。
+// Server side 回傳空物件（型別斷言），實際上永遠不會在 server 呼叫 auth 方法。
+export const auth: Auth =
+  typeof window !== "undefined" ? createAuth() : ({} as Auth);
 
 export const googleProvider = new GoogleAuthProvider();
