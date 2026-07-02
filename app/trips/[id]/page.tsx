@@ -89,6 +89,12 @@ export default function TripViewPage() {
     <main className="mx-auto max-w-2xl px-5 py-12">
       <div className="mb-8 flex items-center justify-between">
         <Link href="/trips" className="text-sm text-neutral-400 hover:text-neutral-700 transition-colors">← 返回行程列表</Link>
+        <Link
+          href={`/trips/${params.id}/expenses`}
+          className="rounded-lg border border-neutral-200 px-3 py-1.5 text-xs font-medium text-neutral-600 hover:bg-neutral-50 transition-colors"
+        >
+          💰 費用記帳
+        </Link>
       </div>
 
       {view.status === "loading" && <p className="text-sm text-neutral-400">載入中…</p>}
