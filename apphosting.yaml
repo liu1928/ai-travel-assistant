@@ -1,0 +1,6 @@
+# Firebase App Hosting 設定。機密用：firebase apphosting:secrets:set <NAME>
+runConfig:
+  minInstances: 0
+  maxInstances: 2
+  cpu: 1
+  memoryMiB: 512
