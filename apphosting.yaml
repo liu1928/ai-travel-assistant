@@ -1,6 +1,28 @@
-# Firebase App Hosting 設定。機密用：firebase apphosting:secrets:set <NAME>
 runConfig:
   minInstances: 0
   maxInstances: 2
   cpu: 1
   memoryMiB: 512
+
+env:
+  # Firebase Client（瀏覽器端，登入用）— 這些是 public 值，可以放在 yaml
+  - variable: NEXT_PUBLIC_FIREBASE_API_KEY
+    value: "AIzaSyAaIw9ttGXqxmIaD3q50SrWgbE7lkQQyKQ"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+    value: "ai-travel-assistant-20e55.firebaseapp.com"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_FIREBASE_PROJECT_ID
+    value: "ai-travel-assistant-20e55"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_FIREBASE_APP_ID
+    value: "1:943084790354:web:e126599ec2abeac00fb58b"
+    availability:
+      - BUILD
+      - RUNTIME
