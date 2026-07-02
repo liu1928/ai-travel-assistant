@@ -6,6 +6,7 @@ import {
   browserSessionPersistence,
   inMemoryPersistence,
   indexedDBLocalPersistence,
+  browserPopupRedirectResolver,
   GoogleAuthProvider,
   getAuth,
   type Auth,
@@ -28,18 +29,20 @@ function createAuth(): Auth {
         browserSessionPersistence,
         inMemoryPersistence,
       ],
+      // 必須明確傳入 popupRedirectResolver，否則 signInWithPopup 會拋出
+      // auth/argument-error（auth._popupRedirectResolver 為 undefined）
+      popupRedirectResolver: browserPopupRedirectResolver,
     });
   } catch {
-    // initializeAuth 只能呼叫一次，HMR 重複載入時退回 getAuth
+    // initializeAuth 只能呼叫一次，重複載入時退回 getAuth
+    // getAuth() 會自動帶入 browserPopupRedirectResolver
     return getAuth(app);
   }
 }
 
 // ⚠️ 只在瀏覽器環境初始化 Firebase。
 // Next.js build 時會在 server side 執行 "use client" 模組，
-// typeof window 防護讓 server side 不呼叫 initializeApp，
-// 避免 NEXT_PUBLIC_* 未設定時 throw auth/invalid-api-key。
-// Server side 回傳空物件（型別斷言），實際上永遠不會在 server 呼叫 auth 方法。
+// typeof window 防護讓 server side 不呼叫 initializeApp。
 export const auth: Auth =
   typeof window !== "undefined" ? createAuth() : ({} as Auth);
 
