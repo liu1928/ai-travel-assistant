@@ -8,9 +8,11 @@
 一律繁體中文（台灣用語）回覆。
 
 ## 前置檢查（每次任務開始時）
-1. 確認 `task/SPEC.md` 存在。不存在 → 停下來，請 peanut 先提供 SPEC，不要自己猜需求。
-2. 確認 gemini CLI 可用：`gemini --version`。
-   沒裝 → 自動執行 `pnpm add -g @google/gemini-cli`，若需要登入則停下請 peanut 手動 `gemini` 登入一次。
+1. 確認任務對應的 SPEC 存在：核心行程生成功能在 `task/SPEC.md`，其他功能在 `specs/<功能名>.md`
+   （既有：holidays、split-bill、flights-rentals）。都找不到 → 停下來，請 peanut 先提供 SPEC，
+   不要自己猜需求。
+2. 確認 Gemini review 環境可用：`scripts/gemini-review.mjs` 存在、`.env.local` 裡有
+   `GEMINI_API_KEY`。缺 key → 停下請 peanut 提供（不要用 gemini CLI 替代，理由見步驟 4）。
 
 ## 工作流程（每輪固定跑完）
 
@@ -35,17 +37,13 @@ pnpm lint
 ### 4. 產生 diff 並送 Gemini review
 ```bash
 git diff > task/diff.patch
-gemini -p "$(cat <<'EOF'
-你是 code reviewer，只找問題、不做決策、不寫修正程式碼。
-請 review 以下 diff，依嚴重度分類列出：
-- P0：會造成資料損毀、安全漏洞、production 掛掉
-- P1：明確 bug、race condition、edge case 遺漏
-- P2：可讀性、風格、小改善
-每條 finding 附上：檔案位置、你懷疑的原因、如何驗證。
-沒有問題就明確說「無 P0/P1 finding」。
-EOF
-)" < task/diff.patch > task/REVIEW.md
+node scripts/gemini-review.mjs > task/REVIEW.md
 ```
+- review prompt（P0/P1/P2 分級、每條附檔案位置/原因/驗證方式）寫死在腳本裡，不用重打。
+- `GEMINI_API_KEY` 放在 `.env.local`（gitignored，見 `.env.example`），腳本自動載入。
+- ⚠️ **不要用 `gemini` CLI 做這件事**：它遇到 429（額度不足）會靜默無限重試，
+  看起來像卡死（實測 19+ 小時零進展）。REST 直呼的錯誤會立刻浮現。
+  詳見 `task/MEMORY.md` 2026-07-03 條目。
 
 ### 5. 仲裁（不可以直接照單全收）
 逐條處理 `task/REVIEW.md` 的 finding：

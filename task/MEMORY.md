@@ -1,0 +1,69 @@
+# MEMORY — 累積踩雷與決策紀錄
+
+> 每輪任務結束後在這裡補一段：root cause、決策、被否決的方案。下一輪任務開始前先看這份，
+> 不用重新理解一次。
+
+---
+
+## 2026-07-03：Gemini CLI 在 headless review 場景下會卡死
+
+**現象**：`gemini -p "<review prompt>" < diff.patch > review.md` 這種 headless 用法，
+在本機環境下會近乎無限久地卡住（實測過 19+ 小時無進展），不管在原專案目錄還是乾淨的
+臨時目錄都一樣。
+
+**Root cause（已證實）**：**API key 所屬專案的預付額度用完了。** 繞過 CLI 直接打
+Gemini REST API 立刻收到 `HTTP 429 RESOURCE_EXHAUSTED: "Your prepayment credits are
+depleted"`。agentic CLI 收到 429 不會報錯退出，而是靜默無限重試+指數退避——
+看起來像卡死，其實是在無聲等額度。這就是為什麼空目錄一樣卡、19 小時零進展。
+
+**重要教訓**：CLI 卡住不動時，先繞過它直接打底層 API 拿原始錯誤——一次 curl/fetch
+就拿到明確的 429，比對著 CLI 猜行為（ripgrep、approval mode、目錄大小……全是白猜）
+省非常多時間。這跟 task/SPEC.md §7 故障診斷「直接用 curl/node 腳本打 API 看原始錯誤」
+是同一個道理，適用於任何 agentic 工具。
+
+**已知會遇到的連鎖問題**：
+1. `gemini` 預設用 `oauth-personal` 登入方式——Google 已停用這個免費個人帳號的
+   Code Assist 存取，會報 `IneligibleTierError`。解法：改用 API key
+   （`~/.gemini/settings.json` 的 `security.auth.selectedType` 改成 `"gemini-api-key"`，
+   並設 `GEMINI_API_KEY` 環境變數）。**這個設定是全域的，改一次之後應該就一直有效**，
+   不用每次重設。
+2. 就算認證修好了，agent 探索行為造成的卡死還是沒解決。
+3. `--approval-mode yolo` 能解決「等互動確認」這個子問題（headless 沒有 TTY 可以按確認），
+   但不是卡死的主因，加了之後還是會卡。
+
+**被否決/驗證無效的方案**：
+- 改認證方式 → 解決了認證，沒解決卡死。
+- 加 `--yolo` + `timeout` → 逾時還是被砍，agent 探索行為本身太慢。
+- 在乾淨臨時目錄只放 diff 檔重試 → 一樣卡死，而且觀察到 agent 自己爬到父目錄，
+  代表問題不是「目錄裡東西太多」，是 agent 探索行為本身不受目前目錄限制。
+
+**解法（等 peanut 處理額度後即可用）**：
+- peanut 需要到 https://ai.studio/projects 儲值，或提供一組還有額度/免費配額的專案的 key。
+- 額度恢復後，**建議直接用 REST API 而不是 CLI** 做 diff review：一次性呼叫、無工具、
+  無檔案探索、錯誤會立刻浮現而不是靜默重試。可用腳本已寫好並驗證過流程（差額度而已）：
+  `C:/Users/Peanut/.claude/jobs/1fd598bc/tmp/gemini-review/call-gemini.mjs`
+  （讀 diff.patch → 打 `gemini-2.5-flash:generateContent` → 寫 review-out.md；
+  之後可以把它搬進專案永久保存，例如 `scripts/gemini-review.mjs`）。
+- 若堅持用 CLI，記得它遇到 429 會靜默重試看起來像卡死——先打一次 REST API 確認額度
+  再跑 CLI。
+
+**這輪的結論（最終）**：peanut 換了有額度的 key 後，用 REST 腳本一次跑成，review 完成
+並逐條仲裁完畢（8 條 findings，0 條真 P0/P1）。可重複使用的腳本已永久存放在
+`scripts/gemini-review.mjs`，用法：
+`GEMINI_API_KEY=<key> node scripts/gemini-review.mjs > task/REVIEW.md`。
+**以後步驟 4 直接用這個腳本，不要用 gemini CLI**（CLI 遇 429 靜默重試 = 假死）。
+
+**仲裁品質觀察（供未來輪參考）**：這次 Gemini 的 4 條 P1 全部經驗證為誤判/降級——
+其中一條（isFlightEmpty）是明確誤讀 `every` 語意，寫 10 行重現腳本就推翻了。
+印證 CLAUDE.md 鐵律「Reviewer 的意見永遠只是懷疑，經驗證才算數」不是空話：
+如果照單全收會白做四個「修正」，其中一個還會把正確的邏輯改壞。
+
+---
+
+## 2026-07-03：`task/SPEC.md` vs `specs/*.md` 的路徑慣例落差
+
+CLAUDE.md 前置檢查寫「確認 task/SPEC.md 存在」，但本專案實際慣例是：`task/SPEC.md`
+專屬於「行程生成」核心功能的單一事實來源；其他功能（假日、分帳串連、航班租車）各自
+在 `specs/` 底下有自己的 spec 檔（`holidays.md`、`split-bill.md`、`flights-rentals.md`）。
+下一輪任務如果 SPEC 不在 `task/SPEC.md`，先去 `specs/` 底下找對應檔名，不用停下來問
+「SPEC 在哪」——這個路徑差異是已知的，不是任務本身的模糊。

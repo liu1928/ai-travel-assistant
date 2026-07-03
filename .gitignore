@@ -3,3 +3,6 @@ node_modules/
 .env.local
 .env*.local
 *.tsbuildinfo
+
+# CLAUDE.md 流程的暫存產物（每輪重新生成，diff 內容本來就在 git 歷史裡）
+task/diff.patch
