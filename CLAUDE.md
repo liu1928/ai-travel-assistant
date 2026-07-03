@@ -8,9 +8,7 @@
 一律繁體中文（台灣用語）回覆。
 
 ## 前置檢查（每次任務開始時）
-1. 確認任務對應的 SPEC 存在：核心行程生成功能在 `task/SPEC.md`，其他功能在 `specs/<功能名>.md`
-   （既有：holidays、split-bill、flights-rentals）。都找不到 → 停下來，請 peanut 先提供 SPEC，
-   不要自己猜需求。
+1. 確認 `task/SPEC.md` 存在。不存在 → 停下來，請 peanut 先提供 SPEC，不要自己猜需求。
 2. 確認 Gemini review 環境可用：`scripts/gemini-review.mjs` 存在、`.env.local` 裡有
    `GEMINI_API_KEY`。缺 key → 停下請 peanut 提供（不要用 gemini CLI 替代，理由見步驟 4）。
 
