@@ -74,6 +74,7 @@ export async function POST(req: NextRequest) {
       refusal: "AI 無法根據目前輸入生成行程，請調整內容",
       api_error: "行程生成失敗，請稍後再試",
     };
+    console.error("[trip/generate]", JSON.stringify(result.error));
     return NextResponse.json(
       { error: messages[result.error.kind] ?? "生成失敗" },
       { status: 400 },
