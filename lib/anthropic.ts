@@ -1,5 +1,5 @@
 // ⚠️ 伺服器端專用
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { AnthropicError } from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { tripSchema, type Trip, type TripStyle } from "@/schema/trip";
 import type { SavedPlace } from "@/schema/place";
@@ -138,9 +138,8 @@ Atlas AI 分三個階段：
 
 # 📦 輸出格式（唯一允許）
 
-只輸出 JSON：
+只輸出純 JSON（不要用 \`\`\`json 包裝，直接輸出 JSON 物件）：
 
-\`\`\`json
 {
   "title": "旅行名稱",
   "location": "主要地區",
@@ -169,7 +168,8 @@ Atlas AI 分三個階段：
     "max": 0
   }
 }
-\`\`\``;
+
+重要：time 欄位必須是 24 小時制 HH:mm 格式，例如 "09:00"、"13:30"、"21:00"。`;
 
 export type GenerateTripInput = {
   prompt?: string;
@@ -217,6 +217,57 @@ function buildUserMessage(input: GenerateTripInput): string {
   return parts.join("\n\n");
 }
 
+/** "9:00" → "09:00"，"8:30" → "08:30"，其他不變 */
+function normalizeTime(t: string): string {
+  return t.replace(/^(\d):/, "0$1:");
+}
+
+/** 遞迴將所有 time 欄位補零 */
+function normalizeTimesInObject(data: unknown): unknown {
+  if (Array.isArray(data)) return data.map(normalizeTimesInObject);
+  if (data !== null && typeof data === "object") {
+    const obj = data as Record<string, unknown>;
+    const result: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      result[k] = k === "time" && typeof v === "string" ? normalizeTime(v) : normalizeTimesInObject(v);
+    }
+    return result;
+  }
+  return data;
+}
+
+// 模型輸出不是合法 JSON、或不符 tripSchema：兩者都算「refusal」（見 SPEC.md §7④），
+// 用專屬 class 標記，和真正的 API 錯誤（餘額不足、網路等）區分開來。
+class TripOutputParseError extends AnthropicError {}
+
+// 補上時間前導零後再交給 zod 驗證，維持與 tripSchema 一致的 output_config.format
+const tripOutputFormat = (() => {
+  const base = zodOutputFormat(tripSchema);
+  return {
+    ...base,
+    parse(content: string) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(content);
+      } catch (e) {
+        throw new TripOutputParseError(
+          `Failed to parse structured output as JSON: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+
+      const result = tripSchema.safeParse(normalizeTimesInObject(parsed));
+      if (!result.success) {
+        const issues = result.error.issues
+          .slice(0, 3)
+          .map((i) => `${i.path.join(".")}: ${i.message}`)
+          .join("; ");
+        throw new TripOutputParseError(`行程格式有誤：${issues}`);
+      }
+      return result.data;
+    },
+  };
+})();
+
 export async function generateTrip(
   input: GenerateTripInput,
 ): Promise<Result<Trip, GenerateTripError>> {
@@ -236,15 +287,22 @@ export async function generateTrip(
       max_tokens: 4096,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: userMessage }],
-      output_config: { format: zodOutputFormat(tripSchema) },
+      output_config: { format: tripOutputFormat },
     });
 
-    if (message.parsed_output === null) {
+    if (message.stop_reason !== "end_turn") {
       return err({ kind: "refusal", stopReason: message.stop_reason });
+    }
+
+    if (!message.parsed_output) {
+      return err({ kind: "refusal", stopReason: "no_parsed_output" });
     }
 
     return ok(message.parsed_output);
   } catch (e) {
+    if (e instanceof TripOutputParseError) {
+      return err({ kind: "refusal", stopReason: e.message });
+    }
     return err({ kind: "api_error", message: e instanceof Error ? e.message : String(e) });
   }
 }
