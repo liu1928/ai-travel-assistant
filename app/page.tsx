@@ -61,6 +61,11 @@ export default function Home() {
     | { status: "error"; message: string }
   >({ status: "idle" });
 
+  // 群組成員編輯
+  const [memberEditGroup, setMemberEditGroup] = useState<string | null>(null);
+  const [memberDraft, setMemberDraft] = useState<Set<string>>(new Set());
+  const [savingMembers, setSavingMembers] = useState(false);
+
   const savedIds = new Set(saved.map((p) => p.placeId));
 
   async function loadCollection() {
@@ -197,6 +202,56 @@ export default function Home() {
     } finally {
       setBusyId(null);
     }
+  }
+
+  function startMemberEdit(groupName: string) {
+    const currentIds = new Set(saved.filter((p) => p.group === groupName).map((p) => p.placeId));
+    setMemberDraft(currentIds);
+    setMemberEditGroup(groupName);
+  }
+
+  async function saveMemberEdit(groupName: string) {
+    setSavingMembers(true);
+    setError(null);
+    const currentIds = new Set(saved.filter((p) => p.group === groupName).map((p) => p.placeId));
+    const toAdd = [...memberDraft].filter((id) => !currentIds.has(id));
+    const toRemove = [...currentIds].filter((id) => !memberDraft.has(id));
+
+    // 每個地點各自送出、各自成功/失敗，避免一個失敗導致其他已成功的變更被誤判為沒存
+    const changes: { placeId: string; group: string | undefined }[] = [
+      ...toAdd.map((placeId) => ({ placeId, group: groupName })),
+      ...toRemove.map((placeId) => ({ placeId, group: undefined })),
+    ];
+
+    const results = await Promise.allSettled(
+      changes.map(({ placeId, group }) =>
+        authedFetch("/api/collection", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ placeId, group: group ?? "" }),
+        }).then((res) => {
+          if (!res.ok) throw new Error(placeId);
+        })
+      )
+    );
+
+    const succeeded = changes.filter((_, i) => results[i]?.status === "fulfilled");
+    const failedCount = changes.length - succeeded.length;
+
+    if (succeeded.length > 0) {
+      const changeMap = new Map(succeeded.map((c) => [c.placeId, c.group]));
+      setSaved((prev) =>
+        prev.map((p) => (changeMap.has(p.placeId) ? { ...p, group: changeMap.get(p.placeId) } : p))
+      );
+    }
+
+    if (failedCount > 0) {
+      setError(`${failedCount} 個地點更新群組失敗，請重試`);
+      // 保留編輯器開啟：memberDraft 不變，下次儲存只會重試還沒成功的變更
+    } else {
+      setMemberEditGroup(null);
+    }
+    setSavingMembers(false);
   }
 
   async function runBatchRetag() {
@@ -397,14 +452,86 @@ export default function Home() {
         ) : (
           <div className="space-y-6">
             {/* 有群組的分區 */}
-            {groups.map(([groupName, places]) => (
+            {groups.map(([groupName, groupPlaces]) => (
               <div key={groupName}>
-                <h3 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-neutral-500 uppercase tracking-wide">
-                  <span>📁</span> {groupName}
-                  <span className="font-normal text-neutral-400">（{places.length}）</span>
-                </h3>
+                <div className="mb-2 flex items-center justify-between">
+                  <h3 className="flex items-center gap-1.5 text-xs font-semibold text-neutral-500 uppercase tracking-wide">
+                    <span>📁</span> {groupName}
+                    <span className="font-normal text-neutral-400">（{groupPlaces.length}）</span>
+                  </h3>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() =>
+                        memberEditGroup === groupName
+                          ? setMemberEditGroup(null)
+                          : startMemberEdit(groupName)
+                      }
+                      className="text-xs text-neutral-400 hover:text-teal-700 transition-colors"
+                    >
+                      {memberEditGroup === groupName ? "關閉" : "編輯成員"}
+                    </button>
+                    <Link
+                      href={`/trip?group=${encodeURIComponent(groupName)}`}
+                      className="text-xs text-teal-700 hover:text-teal-900 transition-colors"
+                    >
+                      用這個群組生成行程 →
+                    </Link>
+                  </div>
+                </div>
+
+                {/* 群組成員編輯器 */}
+                {memberEditGroup === groupName && (
+                  <div className="mb-3 rounded-lg border border-teal-200 bg-teal-50 p-3">
+                    <p className="mb-2 text-xs font-medium text-teal-800">
+                      勾選要加入「{groupName}」的地點：
+                    </p>
+                    <div className="max-h-52 overflow-y-auto space-y-0.5">
+                      {saved.map((p) => (
+                        <label
+                          key={p.placeId}
+                          className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 hover:bg-teal-100"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={memberDraft.has(p.placeId)}
+                            onChange={() => {
+                              setMemberDraft((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(p.placeId)) next.delete(p.placeId);
+                                else next.add(p.placeId);
+                                return next;
+                              });
+                            }}
+                            className="accent-teal-700"
+                          />
+                          <span className="flex-1 text-sm text-neutral-800">{p.name}</span>
+                          {p.group && p.group !== groupName && (
+                            <span className="text-xs text-neutral-400">📁 {p.group}</span>
+                          )}
+                        </label>
+                      ))}
+                    </div>
+                    <div className="mt-2.5 flex gap-2">
+                      <button
+                        onClick={() => void saveMemberEdit(groupName)}
+                        disabled={savingMembers}
+                        className="rounded-md bg-teal-700 px-3 py-1 text-xs font-medium text-white hover:bg-teal-800 disabled:opacity-40"
+                      >
+                        {savingMembers ? "儲存中…" : "儲存"}
+                      </button>
+                      <button
+                        onClick={() => setMemberEditGroup(null)}
+                        disabled={savingMembers}
+                        className="rounded-md border border-neutral-300 px-3 py-1 text-xs text-neutral-600 hover:bg-white disabled:opacity-40"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 <ul className="space-y-2">
-                  {places.map((p) => <PlaceCard key={p.placeId} p={p} />)}
+                  {groupPlaces.map((p) => <PlaceCard key={p.placeId} p={p} />)}
                 </ul>
               </div>
             ))}
