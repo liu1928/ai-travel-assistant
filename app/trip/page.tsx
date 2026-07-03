@@ -77,6 +77,7 @@ function TripGenerateInner() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [groupFilter, setGroupFilter] = useState<string>(initialGroup);
   const [prompt, setPrompt] = useState("");
+  const [startDate, setStartDate] = useState("");
   const [days, setDays] = useState<number | "">("");
   const [style, setStyle] = useState<TripStyle | "">("");
   const [budgetMin, setBudgetMin] = useState<number | "">("");
@@ -129,6 +130,7 @@ function TripGenerateInner() {
           budgetMin: budgetMin === "" ? undefined : budgetMin,
           budgetMax: budgetMax === "" ? undefined : budgetMax,
           travelMode,
+          startDate: startDate || undefined,
         }),
       });
       const data = (await res.json()) as { trip?: Trip; error?: string };
@@ -230,6 +232,16 @@ function TripGenerateInner() {
       })()}
 
       <div className="mb-4 grid grid-cols-2 gap-3">
+        <div>
+          <label className="mb-1 block text-xs font-medium text-neutral-500">出發日期（可留空）</label>
+          <input
+            type="date"
+            value={startDate}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setStartDate(e.target.value)}
+            className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+          />
+          <p className="mt-1 text-xs text-neutral-400">填了會自動偵測當地連假、避開人潮</p>
+        </div>
         <div>
           <label className="mb-1 block text-xs font-medium text-neutral-500">天數</label>
           <input

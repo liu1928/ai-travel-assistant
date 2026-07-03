@@ -171,6 +171,8 @@ Atlas AI 分三個階段：
 
 重要：time 欄位必須是 24 小時制 HH:mm 格式，例如 "09:00"、"13:30"、"21:00"。`;
 
+export type HolidayInfo = { date: string; name: string };
+
 export type GenerateTripInput = {
   prompt?: string;
   places?: SavedPlace[]; // 使用者勾選的收藏地點（V2）
@@ -178,6 +180,8 @@ export type GenerateTripInput = {
   style?: TripStyle;
   budgetMin?: number;
   budgetMax?: number;
+  startDate?: string; // YYYY-MM-DD，出發日期
+  holidays?: HolidayInfo[]; // 行程期間當地假日（含前後緩衝）
 };
 
 export type GenerateTripError =
@@ -185,6 +189,8 @@ export type GenerateTripError =
   | { kind: "missing_input" }
   | { kind: "refusal"; stopReason: string | null }
   | { kind: "api_error"; message: string };
+
+const WEEKDAY_LABEL = ["日", "一", "二", "三", "四", "五", "六"];
 
 function buildUserMessage(input: GenerateTripInput): string {
   const parts: string[] = [];
@@ -205,6 +211,11 @@ function buildUserMessage(input: GenerateTripInput): string {
   }
 
   const constraints: string[] = [];
+  if (input.startDate) {
+    const d = new Date(`${input.startDate}T00:00:00`);
+    const weekday = Number.isNaN(d.getTime()) ? "" : `（週${WEEKDAY_LABEL[d.getDay()]}）`;
+    constraints.push(`出發日期：${input.startDate}${weekday}`);
+  }
   if (input.days) constraints.push(`天數：${input.days} 天`);
   if (input.style) constraints.push(`風格偏好：${input.style}`);
   if (typeof input.budgetMin === "number" || typeof input.budgetMax === "number") {
@@ -212,6 +223,13 @@ function buildUserMessage(input: GenerateTripInput): string {
   }
   if (constraints.length > 0) {
     parts.push(`限制條件：\n${constraints.join("\n")}`);
+  }
+
+  if (input.holidays && input.holidays.length > 0) {
+    const lines = input.holidays.map((h) => `- ${h.date}：${h.name}`).join("\n");
+    parts.push(
+      `行程期間當地假日/特殊日子（人潮預警）：\n${lines}\n\n請據此調整行程：熱門景點避開假日尖峰（改排冷門時段或替代地點）、餐廳提醒可能需要訂位、在 insights 中明確提醒使用者哪幾天人潮較多與建議對策。`,
+    );
   }
 
   return parts.join("\n\n");

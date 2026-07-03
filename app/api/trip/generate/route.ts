@@ -1,8 +1,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireUid } from "@/lib/auth";
-import { generateTrip } from "@/lib/anthropic";
+import { generateTrip, type HolidayInfo } from "@/lib/anthropic";
 import { listPlaces } from "@/lib/collection";
 import { estimateLegs, resolveCoordinates, type TravelMode } from "@/lib/routes";
+import { guessCountry, holidaysInRange } from "@/lib/holidays";
 import type { TripStyle } from "@/schema/trip";
 import type { SavedPlace } from "@/schema/place";
 
@@ -14,6 +15,7 @@ type Body = {
   budgetMin?: number;
   budgetMax?: number;
   travelMode?: TravelMode;
+  startDate?: string; // YYYY-MM-DD
 };
 
 const MODE_LABEL: Record<TravelMode, string> = {
@@ -38,6 +40,22 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // best-effort：查行程期間當地假日（查不到不影響生成）
+  let holidays: HolidayInfo[] = [];
+  if (body.startDate) {
+    try {
+      const countryTexts = [
+        ...places.map((p) => p.address ?? ""),
+        ...places.map((p) => p.name),
+        body.prompt ?? "",
+      ];
+      const country = guessCountry(countryTexts);
+      holidays = await holidaysInRange(country, body.startDate, body.days ?? 2);
+    } catch {
+      // 假日是加值資訊，失敗不影響主要生成結果
+    }
+  }
+
   const result = await generateTrip({
     prompt: body.prompt,
     places,
@@ -45,6 +63,8 @@ export async function POST(req: NextRequest) {
     style: body.style,
     budgetMin: body.budgetMin,
     budgetMax: body.budgetMax,
+    startDate: body.startDate,
+    holidays,
   });
 
   if (!result.ok) {
