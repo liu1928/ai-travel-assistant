@@ -48,6 +48,18 @@ function navUrl(item: ScheduleItem): string {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
 }
 
+const SPLIT_BILL_URL = process.env.NEXT_PUBLIC_SPLIT_BILL_URL;
+
+function buildSplitBillHref(base: string, trip: SavedTrip): string {
+  const params = new URLSearchParams({
+    from: "atlas",
+    title: trip.title,
+    days: String(trip.days.length),
+    budget: String(trip.budget.max),
+  });
+  return `${base.replace(/\/$/, "")}/?${params.toString()}`;
+}
+
 export default function TripViewPage() {
   const { user, loading } = useAuth();
   const params = useParams<{ id: string }>();
@@ -152,6 +164,16 @@ export default function TripViewPage() {
     <main className="mx-auto max-w-2xl px-5 py-12">
       <div className="mb-8 flex items-center justify-between">
         <Link href="/trips" className="text-sm text-neutral-400 hover:text-neutral-700 transition-colors">← 返回行程列表</Link>
+        {view.status === "ready" && SPLIT_BILL_URL && (
+          <a
+            href={buildSplitBillHref(SPLIT_BILL_URL, view.trip)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-sm font-medium text-emerald-700 hover:text-emerald-900 transition-colors"
+          >
+            去分帳 →
+          </a>
+        )}
       </div>
 
       {view.status === "loading" && <p className="text-sm text-neutral-400">載入中…</p>}

@@ -94,29 +94,4 @@ user message 附加內容：
 
 ---
 
-# Spec — Expense Integration(分帳串連)※ 規劃中，未實作
-
-## 1. 決策：兩階段
-
-### 階段 1 — Link-out(下一步要做的)
-行程頁加「💰 去分帳」按鈕，query string 帶 context 跳轉到分帳 app：
-
-```
-{分帳網址}?title={行程名稱}&days={天數}&budget={預算上限}&members=&from=atlas
-```
-
-- Atlas 端只加一顆按鈕（1 檔變更：/trips/[id]/page.tsx）
-- 分帳 app 端需要：讀 URL 參數自動建立帳本（在分帳 app 的 repo 做）
-- 不共用後端、不共用登入，零耦合
-
-### 階段 2 — 資料互通(有痛點再做)
-- 前提：兩個 app 共用同一個 Firebase 專案（登入互通）
-- 分帳 app 開 API：`GET /api/ledgers?tripId=` 
-- Atlas 行程頁顯示「這趟花了多少」摘要
-- 觸發條件：階段 1 用了一陣子後真的想要再做
-
-## 2. 待使用者提供
-
-- [ ] 分帳 app 的網址
-- [ ] 分帳 app 是否已支援（或能加上）URL 參數建立帳本
-- [ ] 分帳 app 用的登入系統（若也是 Firebase，階段 2 很容易）
+分帳串連（Expense Integration）規劃已經促成獨立 spec，見 [`specs/split-bill.md`](./split-bill.md)。
