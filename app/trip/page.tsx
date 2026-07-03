@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth, signInWithGoogle, authedFetch } from "@/lib/use-auth";
 import type { SavedPlace } from "@/schema/place";
 
@@ -48,13 +48,34 @@ const TYPE_LABEL: Record<ScheduleItem["type"], string> = {
   rest: "休息",
 };
 
+function navUrl(item: ScheduleItem): string {
+  const q = item.location ?? item.title;
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
+}
+
 export default function TripGeneratePage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="flex min-h-screen items-center justify-center text-sm text-neutral-400">
+          載入中…
+        </main>
+      }
+    >
+      <TripGenerateInner />
+    </Suspense>
+  );
+}
+
+function TripGenerateInner() {
   const { user, loading } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const initialGroup = searchParams.get("group") ?? "";
 
   const [places, setPlaces] = useState<SavedPlace[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [groupFilter, setGroupFilter] = useState<string>("");
+  const [groupFilter, setGroupFilter] = useState<string>(initialGroup);
   const [prompt, setPrompt] = useState("");
   const [days, setDays] = useState<number | "">("");
   const [style, setStyle] = useState<TripStyle | "">("");
@@ -73,6 +94,12 @@ export default function TripGeneratePage() {
       if (res.ok) setPlaces(data.places ?? []);
     })();
   }, [user]);
+
+  useEffect(() => {
+    if (!initialGroup || places.length === 0) return;
+    const ids = places.filter((p) => p.group === initialGroup).map((p) => p.placeId);
+    if (ids.length > 0) setSelectedIds(new Set(ids));
+  }, [initialGroup, places]);
 
   function toggleSelect(placeId: string) {
     setSelectedIds((prev) => {
@@ -178,7 +205,7 @@ export default function TripGeneratePage() {
                   className="rounded-md border border-neutral-200 px-2 py-0.5 text-xs text-neutral-600 outline-none"
                 >
                   <option value="">全部群組</option>
-                  {groups.map((g) => <option key={g} value={g}>&#x1F4C1; {g}</option>)}
+                  {groups.map((g) => <option key={g} value={g}>📁 {g}</option>)}
                 </select>
               )}
             </div>
@@ -300,6 +327,16 @@ export default function TripGeneratePage() {
                         <span className="ml-2 text-xs text-neutral-400">{TYPE_LABEL[item.type]}</span>
                       </p>
                       <p className="text-xs text-neutral-500">{item.description}</p>
+                      {(item.type === "place" || item.type === "food") && (
+                        <a
+                          href={navUrl(item)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="mt-1 inline-block text-xs text-teal-700 hover:text-teal-900"
+                        >
+                          🧭 導航
+                        </a>
+                      )}
                     </div>
                   </li>
                 ))}
