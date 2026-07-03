@@ -1,18 +1,18 @@
 // ⚠️ 伺服器端專用：已儲存行程的 Firestore CRUD（per-user）
 import { db } from "./firebase";
-import { tripSchema, type Trip } from "@/schema/trip";
+import { tripWithBookingsSchema, type TripWithBookings } from "@/schema/trip";
 import { ok, err, type Result } from "./result";
 import { z } from "zod";
 
 export type TripError = { kind: "db_error"; message: string } | { kind: "not_found" };
 
 export const savedTripSchema = z.object({
-  ...tripSchema.shape,
+  ...tripWithBookingsSchema.shape,
   id: z.string(),
   createdAt: z.number(),
   updatedAt: z.number().optional(),
 });
-export type SavedTrip = Trip & { id: string; createdAt: number; updatedAt?: number };
+export type SavedTrip = TripWithBookings & { id: string; createdAt: number; updatedAt?: number };
 
 function tripsCol(uid: string) {
   return db().collection("users").doc(uid).collection("trips");
@@ -21,7 +21,10 @@ function fail(e: unknown): Result<never, TripError> {
   return err({ kind: "db_error", message: e instanceof Error ? e.message : String(e) });
 }
 
-export async function saveTrip(uid: string, trip: Trip): Promise<Result<SavedTrip, TripError>> {
+export async function saveTrip(
+  uid: string,
+  trip: TripWithBookings,
+): Promise<Result<SavedTrip, TripError>> {
   try {
     const ref = tripsCol(uid).doc();
     const doc: SavedTrip = { ...trip, id: ref.id, createdAt: Date.now() };
@@ -61,7 +64,7 @@ export async function getTrip(uid: string, id: string): Promise<Result<SavedTrip
 export async function updateTrip(
   uid: string,
   id: string,
-  trip: Trip,
+  trip: TripWithBookings,
 ): Promise<Result<SavedTrip, TripError>> {
   try {
     const ref = tripsCol(uid).doc(id);

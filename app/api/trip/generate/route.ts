@@ -4,8 +4,9 @@ import { generateTrip, type HolidayInfo } from "@/lib/anthropic";
 import { listPlaces } from "@/lib/collection";
 import { estimateLegs, resolveCoordinates, type TravelMode } from "@/lib/routes";
 import { guessCountry, holidaysInRange } from "@/lib/holidays";
-import type { TripStyle } from "@/schema/trip";
+import { flightSchema, carRentalSchema, type TripStyle, type Flight, type CarRental } from "@/schema/trip";
 import type { SavedPlace } from "@/schema/place";
+import { z } from "zod";
 
 type Body = {
   prompt?: string;
@@ -16,7 +17,12 @@ type Body = {
   budgetMax?: number;
   travelMode?: TravelMode;
   startDate?: string; // YYYY-MM-DD
+  flights?: unknown; // 使用者輸入的訂位資料，進來先過 zod
+  carRentals?: unknown;
 };
+
+const flightsArraySchema = z.array(flightSchema);
+const carRentalsArraySchema = z.array(carRentalSchema);
 
 const MODE_LABEL: Record<TravelMode, string> = {
   DRIVE: "開車",
@@ -30,6 +36,24 @@ export async function POST(req: NextRequest) {
 
   const body = (await req.json().catch(() => null)) as Body | null;
   if (!body) return NextResponse.json({ error: "請求格式錯誤" }, { status: 400 });
+
+  // 航班/租車是使用者主動輸入的主要資料：格式錯 → 400 明講，不做 best-effort 吞掉
+  let flights: Flight[] = [];
+  if (body.flights !== undefined) {
+    const parsed = flightsArraySchema.safeParse(body.flights);
+    if (!parsed.success) {
+      return NextResponse.json({ error: "航班或租車資料格式不正確" }, { status: 400 });
+    }
+    flights = parsed.data;
+  }
+  let carRentals: CarRental[] = [];
+  if (body.carRentals !== undefined) {
+    const parsed = carRentalsArraySchema.safeParse(body.carRentals);
+    if (!parsed.success) {
+      return NextResponse.json({ error: "航班或租車資料格式不正確" }, { status: 400 });
+    }
+    carRentals = parsed.data;
+  }
 
   let places: SavedPlace[] = [];
   if (body.placeIds && body.placeIds.length > 0) {
@@ -65,6 +89,8 @@ export async function POST(req: NextRequest) {
     budgetMax: body.budgetMax,
     startDate: body.startDate,
     holidays,
+    flights,
+    carRentals,
   });
 
   if (!result.ok) {
@@ -116,5 +142,6 @@ export async function POST(req: NextRequest) {
     // Routes 是加值資訊，不影響主要生成結果
   }
 
-  return NextResponse.json({ trip });
+  // 使用者輸入的訂位資料附掛回傳（AI 輸出本身不含，見 specs/flights-rentals.md §3）
+  return NextResponse.json({ trip: { ...trip, flights, carRentals } });
 }

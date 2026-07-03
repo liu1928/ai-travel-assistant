@@ -1,7 +1,7 @@
 // ⚠️ 伺服器端專用
 import Anthropic, { AnthropicError } from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
-import { tripSchema, type Trip, type TripStyle } from "@/schema/trip";
+import { tripSchema, type Trip, type TripStyle, type Flight, type CarRental } from "@/schema/trip";
 import type { SavedPlace } from "@/schema/place";
 import { ok, err, type Result } from "./result";
 import { envOr } from "./env";
@@ -182,6 +182,8 @@ export type GenerateTripInput = {
   budgetMax?: number;
   startDate?: string; // YYYY-MM-DD，出發日期
   holidays?: HolidayInfo[]; // 行程期間當地假日（含前後緩衝）
+  flights?: Flight[]; // 使用者已訂航班（硬約束）
+  carRentals?: CarRental[]; // 使用者已訂租車
 };
 
 export type GenerateTripError =
@@ -229,6 +231,35 @@ function buildUserMessage(input: GenerateTripInput): string {
     const lines = input.holidays.map((h) => `- ${h.date}：${h.name}`).join("\n");
     parts.push(
       `行程期間當地假日/特殊日子（人潮預警）：\n${lines}\n\n請據此調整行程：熱門景點避開假日尖峰（改排冷門時段或替代地點）、餐廳提醒可能需要訂位、在 insights 中明確提醒使用者哪幾天人潮較多與建議對策。`,
+    );
+  }
+
+  if (input.flights && input.flights.length > 0) {
+    const lines = input.flights
+      .map((f) => {
+        const airline = f.airline ? `${f.airline} ` : "";
+        const date = f.date ? `${f.date} ` : "";
+        const note = f.note ? `（${f.note}）` : "";
+        return `- ${airline}${f.flightNo} ${f.from} → ${f.to}，${date}${f.departTime} 起飛，${f.arriveTime} 抵達${note}`;
+      })
+      .join("\n");
+    parts.push(
+      `航班資訊（已訂，硬約束）：\n${lines}\n\n請據此安排：\n- 抵達當天的行程從落地後約 1.5 小時開始（入境+提領行李）\n- 起飛當天的行程在起飛前 2.5 小時結束，並在時間軸排入「前往機場」（type: transport）\n- 不要建議任何其他航班——航班已訂死，只能圍繞它排行程`,
+    );
+  }
+
+  if (input.carRentals && input.carRentals.length > 0) {
+    const lines = input.carRentals
+      .map((r) => {
+        const company = r.company ? `${r.company}：` : "";
+        const pd = r.pickupDate ? `${r.pickupDate} ` : "";
+        const dd = r.dropoffDate ? `${r.dropoffDate} ` : "";
+        const note = r.note ? `（${r.note}）` : "";
+        return `- ${company}${pd}${r.pickupTime} ${r.pickupLocation}取車 → ${dd}${r.dropoffTime} ${r.dropoffLocation}還車${note}`;
+      })
+      .join("\n");
+    parts.push(
+      `租車資訊（已訂）：\n${lines}\n\n請據此安排：\n- 取車與還車各排入時間軸一項（type: transport）\n- 租車期間的移動以開車為主`,
     );
   }
 

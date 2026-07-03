@@ -4,6 +4,16 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useAuth, signInWithGoogle, authedFetch } from "@/lib/use-auth";
+import type { Flight, CarRental } from "@/schema/trip";
+import {
+  BookingCards,
+  BookingsFields,
+  draftsToBookings,
+  flightToDraft,
+  rentalToDraft,
+  type FlightDraft,
+  type CarRentalDraft,
+} from "@/components/bookings";
 
 type ScheduleItem = {
   time: string;
@@ -22,6 +32,8 @@ type SavedTrip = {
   days: TripDay[];
   insights: string[];
   budget: { min: number; max: number };
+  flights?: Flight[];
+  carRentals?: CarRental[];
   createdAt: number;
 };
 
@@ -70,6 +82,13 @@ export default function TripViewPage() {
   const [draftDays, setDraftDays] = useState<TripDay[]>([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  // 航班/租車有自己的編輯模式：儲存後補填不重新生成（specs/flights-rentals.md §2.5）
+  const [editingBookings, setEditingBookings] = useState(false);
+  const [flightDrafts, setFlightDrafts] = useState<FlightDraft[]>([]);
+  const [rentalDrafts, setRentalDrafts] = useState<CarRentalDraft[]>([]);
+  const [savingBookings, setSavingBookings] = useState(false);
+  const [bookingsError, setBookingsError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -138,6 +157,41 @@ export default function TripViewPage() {
     }
   }
 
+  function startBookingsEdit() {
+    if (view.status !== "ready") return;
+    setFlightDrafts((view.trip.flights ?? []).map(flightToDraft));
+    setRentalDrafts((view.trip.carRentals ?? []).map(rentalToDraft));
+    setBookingsError(null);
+    setEditingBookings(true);
+  }
+
+  async function saveBookings() {
+    if (view.status !== "ready") return;
+    const bookings = draftsToBookings(flightDrafts, rentalDrafts);
+    if (!bookings.ok) {
+      setBookingsError(bookings.message);
+      return;
+    }
+    setSavingBookings(true);
+    setBookingsError(null);
+    try {
+      const updatedTrip = { ...view.trip, flights: bookings.flights, carRentals: bookings.carRentals };
+      const res = await authedFetch(`/api/trips/${view.trip.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trip: updatedTrip }),
+      });
+      const data = (await res.json()) as { trip?: SavedTrip; error?: string };
+      if (!res.ok || !data.trip) throw new Error(data.error ?? "儲存失敗");
+      setView({ status: "ready", trip: data.trip });
+      setEditingBookings(false);
+    } catch (e) {
+      setBookingsError(e instanceof Error ? e.message : "儲存失敗");
+    } finally {
+      setSavingBookings(false);
+    }
+  }
+
   async function handleDelete() {
     if (view.status !== "ready") return;
     try {
@@ -199,6 +253,52 @@ export default function TripViewPage() {
               )}
               <button onClick={() => void handleDelete()} className="text-xs text-neutral-400 hover:text-red-600">刪除</button>
             </div>
+          </div>
+
+          <div className="mb-4">
+            {!editingBookings ? (
+              <>
+                <BookingCards flights={view.trip.flights} carRentals={view.trip.carRentals} />
+                <button
+                  onClick={startBookingsEdit}
+                  className="text-xs text-teal-700 hover:text-teal-900"
+                >
+                  {(view.trip.flights?.length ?? 0) > 0 || (view.trip.carRentals?.length ?? 0) > 0
+                    ? "編輯航班/租車"
+                    : "＋ 新增航班/租車"}
+                </button>
+              </>
+            ) : (
+              <div className="rounded-lg border border-neutral-200 p-4">
+                <BookingsFields
+                  flights={flightDrafts}
+                  rentals={rentalDrafts}
+                  onFlightsChange={setFlightDrafts}
+                  onRentalsChange={setRentalDrafts}
+                  defaultOpen
+                />
+                {bookingsError && (
+                  <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{bookingsError}</p>
+                )}
+                <div className="mt-3 flex items-center gap-2">
+                  <button
+                    onClick={() => void saveBookings()}
+                    disabled={savingBookings}
+                    className="rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-teal-800 disabled:opacity-40"
+                  >
+                    {savingBookings ? "儲存中…" : "儲存"}
+                  </button>
+                  <button
+                    onClick={() => { setEditingBookings(false); setBookingsError(null); }}
+                    disabled={savingBookings}
+                    className="rounded-lg border border-neutral-300 px-3 py-1.5 text-xs text-neutral-600 hover:bg-neutral-50 disabled:opacity-40"
+                  >
+                    取消
+                  </button>
+                  <span className="text-xs text-neutral-400">補填只做記錄，不會重排時間軸</span>
+                </div>
+              </div>
+            )}
           </div>
 
           {saveError && <p className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{saveError}</p>}

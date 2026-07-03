@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireUid } from "@/lib/auth";
 import { saveTrip, listTrips } from "@/lib/trips";
-import { tripSchema } from "@/schema/trip";
+import { tripWithBookingsSchema } from "@/schema/trip";
 
 export async function GET(req: NextRequest) {
   const auth = await requireUid(req);
@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
   if (!auth.ok) return NextResponse.json({ error: auth.error.message }, { status: 401 });
 
   const body = (await req.json().catch(() => null)) as { trip?: unknown } | null;
-  const parsed = tripSchema.safeParse(body?.trip);
+  const parsed = tripWithBookingsSchema.safeParse(body?.trip);
   if (!parsed.success) {
     return NextResponse.json({ error: "行程資料格式不正確" }, { status: 400 });
   }

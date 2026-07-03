@@ -41,3 +41,40 @@ export const tripSchema = z.object({
   budget: tripBudgetSchema,
 });
 export type Trip = z.infer<typeof tripSchema>;
+
+// --- 航班與租車（使用者手動輸入的訂位資料）---
+// ⚠️ tripSchema（AI 結構化輸出用）絕不能包含這些欄位，
+// 否則 structured outputs 會讓模型編造航班號/時刻。見 specs/flights-rentals.md §3。
+
+const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+
+export const flightSchema = z.object({
+  flightNo: z.string().min(1),
+  airline: z.string().optional(),
+  from: z.string().min(1),
+  to: z.string().min(1),
+  date: z.string().regex(datePattern, "date 必須是 YYYY-MM-DD 格式").optional(),
+  departTime: z.string().regex(timePattern, "departTime 必須是 HH:mm 格式"),
+  arriveTime: z.string().regex(timePattern, "arriveTime 必須是 HH:mm 格式"),
+  note: z.string().optional(),
+});
+export type Flight = z.infer<typeof flightSchema>;
+
+export const carRentalSchema = z.object({
+  company: z.string().optional(),
+  pickupLocation: z.string().min(1),
+  pickupDate: z.string().regex(datePattern, "pickupDate 必須是 YYYY-MM-DD 格式").optional(),
+  pickupTime: z.string().regex(timePattern, "pickupTime 必須是 HH:mm 格式"),
+  dropoffLocation: z.string().min(1),
+  dropoffDate: z.string().regex(datePattern, "dropoffDate 必須是 YYYY-MM-DD 格式").optional(),
+  dropoffTime: z.string().regex(timePattern, "dropoffTime 必須是 HH:mm 格式"),
+  note: z.string().optional(),
+});
+export type CarRental = z.infer<typeof carRentalSchema>;
+
+// 儲存/編輯用：Trip + 訂位資料。舊 Firestore 文件缺欄位 → default 補空陣列，免資料遷移。
+export const tripWithBookingsSchema = tripSchema.extend({
+  flights: z.array(flightSchema).default([]),
+  carRentals: z.array(carRentalSchema).default([]),
+});
+export type TripWithBookings = z.infer<typeof tripWithBookingsSchema>;

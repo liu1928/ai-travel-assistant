@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireUid } from "@/lib/auth";
 import { getTrip, deleteTrip, updateTrip } from "@/lib/trips";
-import { tripSchema } from "@/schema/trip";
+import { tripWithBookingsSchema } from "@/schema/trip";
 
 export async function GET(
   req: NextRequest,
@@ -29,7 +29,7 @@ export async function PATCH(
 
   const { id } = await params;
   const body = (await req.json().catch(() => null)) as { trip?: unknown } | null;
-  const parsed = tripSchema.safeParse(body?.trip);
+  const parsed = tripWithBookingsSchema.safeParse(body?.trip);
   if (!parsed.success) {
     return NextResponse.json({ error: "行程資料格式不正確" }, { status: 400 });
   }
