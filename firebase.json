@@ -1,6 +1,6 @@
 {
   "apphosting": {
-    "backendId": "my-web-app",
+    "backendId": "ai-travel-assistant",
     "rootDir": "/",
     "ignore": [
       "node_modules",

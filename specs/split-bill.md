@@ -28,7 +28,7 @@ split-bill main.tsx 讀 URLSearchParams
              <App /> 既有「預設選最新行程」邏輯（trips[0]，createdAt desc）自然帶出新帳本
 ```
 
-- Atlas 端：`https://my-web-app--ai-travel-assistant-20e55.asia-east1.hosted.app`
+- Atlas 端：`https://ai-travel-assistant--ai-travel-assistant-20e55.asia-east1.hosted.app`（正式 backend；未來改指 atlas.oioi8.com）
 - split-bill 端：本地無後端 PWA，這次**不部署**——`NEXT_PUBLIC_SPLIT_BILL_URL` 未設定時 Atlas 端連結自動隱藏，安全併入 main。
 
 ## 2. 契約
