@@ -1,8 +1,12 @@
 node_modules/
 .next/
+.env
 .env.local
 .env*.local
 *.tsbuildinfo
+
+# Turbopack/建置產物散落在 root 的暫存檔（曾誤 commit 進 c1.txt/c2.txt）
+c*.txt
 
 # CLAUDE.md 流程的暫存產物（每輪重新生成，diff 內容本來就在 git 歷史裡）
 task/diff.patch

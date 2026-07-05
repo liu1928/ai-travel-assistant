@@ -26,6 +26,8 @@ async function resolveUrl(input: string): Promise<Result<string, ShareLinkError>
       method: "GET",
       redirect: "follow",
       headers: { "User-Agent": BOT_UA },
+      // 沒有 timeout 會讓惡意/慢速目標把請求掛住。5 秒足夠短連結轉址。
+      signal: AbortSignal.timeout(5000),
     });
     return ok(res.url);
   } catch (e) {
@@ -33,12 +35,31 @@ async function resolveUrl(input: string): Promise<Result<string, ShareLinkError>
   }
 }
 
-function isMapsUrl(url: string): boolean {
-  return (
-    url.includes("google.com/maps") ||
-    url.includes("maps.google.com") ||
-    url.includes("maps.app.goo.gl")
-  );
+// SSRF 防護：只有這些網域的「輸入連結」才准 fetch。
+// maps.app.goo.gl / goo.gl 是短連結；其餘走 google 主網域（含國別 TLD）。
+const ALLOWED_INPUT_HOSTS = new Set(["maps.app.goo.gl", "goo.gl"]);
+const GOOGLE_MAPS_HOST = /^(www\.|maps\.)?google\.(com|co\.[a-z]{2}|[a-z]{2,3})$/;
+
+// 驗證「使用者貼進來、還沒 fetch 的原始連結」是不是可信的 Google Maps 網域。
+// 必須是 https，且 host 命中白名單——擋掉 http://、file://、以及指向內網
+// （如 metadata.google.internal）的任意 URL。轉址後的最終網址另由 isMapsUrl 再驗一次。
+export function isAllowedInputUrl(u: URL): boolean {
+  if (u.protocol !== "https:") return false;
+  const host = u.hostname.toLowerCase();
+  return ALLOWED_INPUT_HOSTS.has(host) || GOOGLE_MAPS_HOST.test(host);
+}
+
+// 轉址後的最終網址驗證：解析出 hostname 精確比對，不用 includes 子字串。
+// 否則 https://attacker.com/?x=google.com/maps 這種把可信字串塞進 query/path 的
+// 連結會騙過檢查。國別網域沿用 GOOGLE_MAPS_HOST。
+export function isMapsUrl(url: string): boolean {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return host === "maps.app.goo.gl" || host === "goo.gl" || GOOGLE_MAPS_HOST.test(host);
 }
 
 // 舊格式：URL 內直接含 ChIJ... 開頭的 place_id
@@ -157,10 +178,20 @@ async function searchByNameAndCoords(
 export async function parseShareLink(
   rawUrl: string,
 ): Promise<Result<ShareLinkResult, ShareLinkError>> {
+  let parsed: URL;
   try {
-    new URL(rawUrl);
+    parsed = new URL(rawUrl);
   } catch {
     return err({ kind: "invalid_url" });
+  }
+
+  // SSRF 防線：先確認網域，再 fetch。舊版是 fetch(rawUrl) 之後才用 isMapsUrl 檢查，
+  // 等於請求已經送出去才攔——本站跑在 Cloud Run 上，會讓攻擊者能探測內網。
+  if (!isAllowedInputUrl(parsed)) {
+    return err({
+      kind: "unsupported",
+      reason: "只接受 Google Maps 分享連結（maps.app.goo.gl 或 google.com/maps）",
+    });
   }
 
   const apiKey = process.env.GOOGLE_MAPS_API_KEY;

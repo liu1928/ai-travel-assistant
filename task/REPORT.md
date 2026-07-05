@@ -1,105 +1,70 @@
-# REPORT — 航班與租車資訊
+<!-- 產生日期: 2026-07-06 | 產生模型: claude-fable-5 | 下次審視: 下次動 sharelink 或部署前 -->
 
-> ⚠️ 這份報告是**事後補寫**：實作/commit/deploy 都在 CLAUDE.md 的 Executor 流程正式套用前
-> 就做完了，這次是照 peanut 要求「補跑」步驟 4（Gemini review）並依 CLAUDE.md 補齊
-> PLAN/REVIEW/REPORT/MEMORY 這一整套文件。
+# REPORT — 安全與清理三改
 
-## 改了哪些檔案
+> 對應審查：`task/REVIEW.md`（時間戳 2026-07-06，審查者 GLM-5.2）。
+> 任務來源：peanut 口頭指示「動手做這三件」（非 task/SPEC.md）。實作 → test/typecheck/lint 全過
+> → GLM 兩輪異質審查 → 本報告後停，等 peanut 驗收。
 
-Commit `2d6d0071`（已 push 到 GitHub、已用 `firebase deploy --only apphosting:my-web-app`
-部署到正式站，revision `my-web-app-build-2026-07-03-004`）：
+## 1. 改了哪些檔案
 
-```
- app/api/trip/generate/route.ts |  31 +++-
- app/api/trips/[id]/route.ts    |   4 +-
- app/api/trips/route.ts         |   4 +-
- app/trip/page.tsx              |  30 ++++
- app/trips/[id]/page.tsx        | 100 +++++++++++++
- components/bookings.tsx        | 314 +++++++++++++++++++++++++++++++++++++++++ (新增)
- lib/anthropic.ts               |  33 ++++-
- lib/trips.ts                   |  13 +-
- schema/__tests__/trip.test.ts  |  84 ++++++++++-
- schema/trip.ts                 |  37 +++++
- specs/flights-rentals.md       | 208 +++++++++++++++++++++++++++ (新增)
- 11 files changed, 845 insertions(+), 13 deletions(-)
-```
+| 檔案 | 改動 |
+|---|---|
+| `lib/sharelink.ts` | SSRF 修補：`parseShareLink` 在 `fetch` 之前先用 `isAllowedInputUrl` 做 https + Google Maps 網域白名單；`resolveUrl` 的 `fetch` 加 `AbortSignal.timeout(5000)`；`isMapsUrl` 由 `includes` 子字串改為解析 hostname 精確比對。新匯出 `isAllowedInputUrl`、`isMapsUrl` 供測試。 |
+| `lib/__tests__/sharelink.test.ts` | 新增：`isAllowedInputUrl`（接受 Google 網域、擋內網/非 https/偽造子網域）與 `isMapsUrl`（擋 query/path 塞字串）共 6 個 case 群。 |
+| `.gitignore` | 補 `.env`、`c*.txt`。 |
+| `c1.txt`, `c2.txt` | `git rm`（Turbopack build 產物，含 Firebase client key，本不該進版控）。 |
+| `task/PLAN.md` `task/REVIEW.md` `task/REPORT.md` | 本輪流程文件（覆寫前一輪；git 歷史保留）。 |
 
-摘要：
-- `schema/trip.ts`：新增 `flightSchema`／`carRentalSchema`／`tripWithBookingsSchema`；
-  `tripSchema`（AI 結構化輸出用）完全不動。
-- `lib/anthropic.ts`：`GenerateTripInput` 加 `flights`/`carRentals`；`buildUserMessage`
-  加兩段硬約束文字（落地 buffer、起飛 buffer、取還車排時間軸）。
-- `lib/trips.ts` + 兩個 `app/api/trips*` route：驗證改用 `tripWithBookingsSchema`，
-  舊 Firestore 文件靠 `.default([])` 補空陣列，無需遷移。
-- `app/api/trip/generate/route.ts`：航班/租車先過 zod，格式錯回 400（不 best-effort 吞掉）；
-  回傳時把使用者輸入的訂位資料附掛到 trip 物件上。
-- `components/bookings.tsx`（新增）：顯示卡 + 動態清單編輯器 + 草稿驗證，`/trip`
-  與 `/trips/[id]` 共用。
-- `app/trip/page.tsx`、`app/trips/[id]/page.tsx`：接上表單/顯示/獨立編輯（PATCH，
-  不重新生成）。
-- `specs/flights-rentals.md`（新增）：本功能的完整 spec。
+## 2. 測試結果
 
-## 測試結果
+- `pnpm test` → **2 檔 22 tests 全過**。
+- `pnpm typecheck`（`tsc --noEmit`）→ **exit 0**。
+- `pnpm lint`（eslint app lib schema）→ **exit 0**。
 
-```
-pnpm typecheck   → 通過（tsc --noEmit 無輸出）
-pnpm test        → 16 個測試全過（原本 5 個 + 本次新增 11 個，含 tripSchema 不含
-                    flights/carRentals 的守護測試）
-pnpm lint        → 通過（eslint 無輸出）
-pnpm build       → 通過（next build 成功，17 條路由全部產出）
-```
+## 3. GLM finding 統計（兩輪）
 
-以上四項在 commit 當下跑過一次，這次補跑流程時又重跑一次確認仍然全綠（見對話紀錄
-2026-07-03 17:37 那次重跑）。
+- 第一輪：🐛×2、⚠️×3、💡×2、❓×1。
+  - **真並修**：1 條（`isMapsUrl` 子字串繞過 → 改 hostname 精確比對）。
+  - **False positive**：1 條（regex 子網域繞過 → 誤讀錨點，實測 + 單測證偽）。
+  - 其餘風險/建議：接受殘留或非問題（見 REVIEW.md 逐條）。
+- 第二輪（改完 isMapsUrl 後）：**🐛 0**，僅重申已接受的殘留風險與 DRY/錯誤訊息建議。
+- **結論：無 P0/P1 未處理項。**
 
-**spec §5 的 7 條手動測試案例尚未由 peanut 實際操作驗證過**（例如「填航班 10:00 起飛 →
-第一天從 ~14:00 開始排」這條）——這是自動化驗證覆蓋不到的部分，需要 peanut 自己在
-正式站或本機 `pnpm dev` 跑一次確認。
+## 4. 原「第三件」的查證結論（重要 — 兩半都不照原方案做）
 
-## Gemini review 狀態：**已完成**（第 5 次嘗試，改走 REST API）
+第三件原本是「行程生成開 prompt caching + 調高 Cloud Run timeout」，查證後兩半都不成立：
 
-前 4 次用 gemini CLI 全部卡死，root cause 後來證實是 **API key 專案預付額度用完**
-（`429 RESOURCE_EXHAUSTED`），CLI 收到 429 靜默無限重試看起來像卡死。peanut 換 key 後
-改用直接呼叫 Gemini REST API 一次成功。可重複使用的腳本已存到
-`scripts/gemini-review.mjs`（之後步驟 4 用它，別再用 CLI）。完整嘗試紀錄與逐條仲裁
-見 `task/REVIEW.md`。
+1. **Prompt caching：不做（會是 no-op）。** `SYSTEM_PROMPT` 實測約 1621 字元 ≈ **900 tokens**；
+   Sonnet 4.6 的 prompt caching 最小可快取前綴是 **2048 tokens**。低於門檻時 `cache_control`
+   不報錯也不快取（`cache_creation_input_tokens: 0`），零效果。故不動 SPEC 範圍的 `lib/anthropic.ts`。
+   → 只有未來 SYSTEM_PROMPT 長到 >2048 tokens，或改用別的快取策略，才值得加。
 
-**Finding 統計：8 條（P0×0、P1×4、P2×4）→ 仲裁後 0 真、4 假/降級、4 條 P2 記錄不修**
-- P1-3（isFlightEmpty 誤丟資料）：**明確誤讀**，寫了重現腳本實測推翻（`every` 語意）
-- P1-1、P1-2（錯誤訊息不夠細）：降級 P2——是 spec 明訂的 API 契約與既有風格，前端已先驗證
-- P1-4（淺層合併覆蓋並行編輯）：目前 UI 走過所有路徑無此問題；多分頁情境屬 SPEC §2.4
-  「整筆覆蓋」語意的已知取捨
-- P2×4：全部記錄不修（controlled input 下 key={i} 資料無虞、unknown+zod 是正確用法、
-  風格一致性、主觀 UX）
+2. **Cloud Run timeout：不能在 `apphosting.yaml` 設。** 查 Firebase 官方文件，`runConfig` 只有
+   `cpu / memoryMiB / maxInstances / minInstances / concurrency / vpcAccess`，**無 `timeoutSeconds`**。
+   request timeout 是 Cloud Run 服務層設定。若要調高（診斷認為長 LLM 呼叫可能撞逾時），請自行執行：
+   ```bash
+   # 先查現值與服務名（App Hosting 的 Cloud Run 服務通常叫 <backendId>）
+   gcloud run services list --project ai-travel-assistant-20e55
+   # 調高到 180 秒（範圍 1–3600）
+   gcloud run services update <SERVICE_NAME> --region <REGION> --timeout=180 \
+     --project ai-travel-assistant-20e55
+   ```
+   註：此為正式站基礎設施變更，需 peanut 用自己的 gcloud 權限跑；我不代為執行。
 
-**無程式碼變更** → 不需回到步驟 3 重跑驗證迴圈（沒有新 diff）。
+## 5. Known issues / 待 peanut 決定
 
-## Known issues / 需要 peanut 決定的事
+1. **審查者衝突（GLM vs Gemini）**：根 `CLAUDE.md` 說「GLM 取代 Gemini，所有專案適用」；但本專案
+   `CLAUDE.md` 步驟 4 仍寫 Gemini，且最近一個 commit 才建好 `scripts/gemini-review.mjs`。本輪照
+   根目錄的較新指示用了 **GLM**。**請 peanut 定調**這個專案往後用哪個，並把落敗的那份文件更新，
+   免得下個弱模型 session 又要重猜。
+2. **國別 `com.XX` 網域不被接受**（`google.com.au`/`com.tw`/`com.hk` 等）：`GOOGLE_MAPS_HOST`
+   涵蓋 `google.com`、`google.co.xx`、`google.<2-3字母>`，但漏 `com.XX`。**這不是回歸**（原 `includes`
+   版本同樣不收），屬既有功能限制。若這些地區的使用者會直接貼完整網址，再開一張功能票處理。
+3. **殘留、刻意不修（皆記於 REVIEW.md）**：`redirect:"follow"` 對可信短連結轉址不逐跳驗證、
+   DNS rebinding、`resolveUrl` 回傳原始錯誤訊息。皆為低風險/超出本次範圍，權衡後保留。
 
-1. **CLAUDE.md 步驟 4 的指令建議更新**：原本寫的 `gemini -p "..." < task/diff.patch` 在這個
-   環境實測會因 CLI 靜默重試行為而不可靠，這次已改用 `scripts/gemini-review.mjs`（REST 直呼）
-   成功跑完。要不要把 CLAUDE.md 步驟 4 的指令改成
-   `GEMINI_API_KEY=<key> node scripts/gemini-review.mjs > task/REVIEW.md`，由 peanut 決定
-   （CLAUDE.md 是不能擅自改的檔案）。另外 GEMINI_API_KEY 建議放進 `.env.local` 之類的
-   gitignored 檔案管理，不要每次貼在對話裡。
-2. **`task/SPEC.md` 路徑跟 CLAUDE.md 前置檢查的假設不完全一致**：CLAUDE.md 假設每個任務
-   都能在 `task/SPEC.md` 找到 SPEC，但本專案的實際慣例是把功能性 spec 放在
-   `specs/*.md`（`holidays.md`、`split-bill.md`、`flights-rentals.md`），`task/SPEC.md`
-   專屬於「行程生成」主功能。這次任務用 `specs/flights-rentals.md` 當作 SPEC 來源。
-   要不要統一 CLAUDE.md 的措辭（例如改成「確認任務對應的 spec 檔案存在，可能在
-   `task/SPEC.md` 或 `specs/*.md`」）由 peanut 決定。
-3. **流程順序的偏差**：這次任務原本是在 CLAUDE.md 生效前用一般模式做完並直接
-   commit/push/deploy 的，事後才補跑 Gemini review 這一步。正常情況下 CLAUDE.md
-   規則 2「超過 3 個檔案的改動 → 先在 task/PLAN.md 條列計畫，請 peanut 確認再動手」
-   應該要在動手前就先給 peanut 看計畫——這次是先做完才補寫 PLAN.md，如實記錄，
-   往後照 CLAUDE.md 走的任務不會有這個問題。
-4. spec §5 的手動測試案例還沒有人實際跑過（見上）。
+## 6. 尚未做（等 peanut 指示，不自作主張）
 
-## 結論
-
-CLAUDE.md 流程的補跑已走完：自動化驗證全綠、Gemini review 完成且逐條仲裁
-（0 條真 P0/P1，無需改碼）、PLAN/REVIEW/REPORT/MEMORY 四份文件齊備。
-仍待 peanut 的事：(a) spec §5 手動測試案例還沒人實際跑過；(b) 上方 Known issues
-1、2 兩個 CLAUDE.md 修訂決定；(c) task/*.md 與 scripts/gemini-review.mjs 要不要
-commit（peanut 說稍等）。**照 CLAUDE.md 規則，只有 peanut 可以宣布任務結束——
-在此停止並等待驗收。**
+- 未 `git commit`。以上都是工作區改動，peanut 驗收後再決定 commit/部署。
+- 未碰上面第 4 節的 apphosting.yaml 或 Cloud Run（原因見上）。
