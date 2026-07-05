@@ -1,4 +1,4 @@
-# CLAUDE.md — AI Team 自動化流程（Executor + Gemini Reviewer）
+# CLAUDE.md — AI Team 自動化流程（Executor + GLM Reviewer）
 
 ## 你的角色
 你是 Executor。收到任務時嚴格照本流程執行，不自行擴大範圍。
@@ -9,8 +9,10 @@
 
 ## 前置檢查（每次任務開始時）
 1. 確認 `task/SPEC.md` 存在。不存在 → 停下來，請 peanut 先提供 SPEC，不要自己猜需求。
-2. 確認 Gemini review 環境可用：`scripts/gemini-review.mjs` 存在、`.env.local` 裡有
-   `GEMINI_API_KEY`。缺 key → 停下請 peanut 提供（不要用 gemini CLI 替代，理由見步驟 4）。
+2. 確認 GLM review 環境可用：MCP `glm-reviewer` 的 `review_code` 工具可呼叫。
+   Claude Code 看不到時，先執行
+   `claude mcp add glm-reviewer -s user -e GLM_API_KEY=<金鑰> -- uv --directory D:\claude\glm-reviewer-mcp run server.py`
+   註冊。缺金鑰 → 停下請 peanut 提供。
 
 ## 工作流程（每輪固定跑完）
 
@@ -32,22 +34,22 @@ pnpm lint
 ```
 全過才能進下一步。不留 debug 用 console.log。
 
-### 4. 產生 diff 並送 Gemini review
-```bash
-git diff > task/diff.patch
-node scripts/gemini-review.mjs > task/REVIEW.md
-```
-- review prompt（P0/P1/P2 分級、每條附檔案位置/原因/驗證方式）寫死在腳本裡，不用重打。
-- `GEMINI_API_KEY` 放在 `.env.local`（gitignored，見 `.env.example`），腳本自動載入。
-- ⚠️ **不要用 `gemini` CLI 做這件事**：它遇到 429（額度不足）會靜默無限重試，
-  看起來像卡死（實測 19+ 小時零進展）。REST 直呼的錯誤會立刻浮現。
-  詳見 `task/MEMORY.md` 2026-07-03 條目。
+### 4. 產生 diff 並送 GLM review
+- 準備要審的內容：`git diff > task/diff.patch`（新檔先 `git add -N` 才會進 diff；
+  build 產物等大檔用 `-- <路徑>` 限縮，別把整包塞進 review）。
+- 呼叫 MCP `glm-reviewer` 的 `review_code(code, context, focus)`：
+  - `code`：本次改動的 diff 或完整檔案（多檔串接，每段標檔名）。
+  - `context`：任務目標與專案限制（例：「Next.js 16 + zod + Firebase，Result pattern，設定進 .env」）。
+  - `focus`：視任務填 `"security"` / `"type-safety"` …，沒特別需求留空。
+- 把回傳結果**原封不動**寫進 `task/REVIEW.md`，開頭加時間戳 + 審查範圍（見既有格式）。
+- ⚠️ 審查者是 GLM-5.2，取代舊的 Gemini 流程（根 `D:\claude\CLAUDE.md`「GLM 異質審查」節）。
+  舊的 `scripts/gemini-review.mjs` 保留備查，不再是預設路徑。
 
 ### 5. 仲裁（不可以直接照單全收）
 逐條處理 `task/REVIEW.md` 的 finding：
 - **實際驗證**：讀相關程式碼、寫個小測試、或跑一次重現步驟。
 - 判定為「真」的 P0/P1 → 修掉，回到步驟 3 重跑驗證。
-- 判定為「假」（Gemini 幻覺）→ 在 REVIEW.md 該條標記 `[FALSE POSITIVE]` 並寫一句理由。
+- 判定為「假」（GLM 幻覺）→ 在 REVIEW.md 該條標記 `[FALSE POSITIVE]` 並寫一句理由。
 - P2 → 記錄不修（除非順手一行能解）。
 - 修完後如有新 diff，重跑步驟 4（最多 2 輪，避免無限迴圈；第 2 輪後還有 P0 就停下來回報）。
 
@@ -55,7 +57,7 @@ node scripts/gemini-review.mjs > task/REVIEW.md
 寫 `task/REPORT.md`：
 - 改了哪些檔案（diff 摘要）
 - 測試結果（test / typecheck / lint 輸出摘要）
-- Gemini finding 統計：幾條真、幾條假、幾條不修
+- GLM finding 統計：幾條真、幾條假、幾條不修
 - Known issues / 需要 peanut 決定的事
 然後**停止並等待驗收**。不可以自己宣布 Done。
 
@@ -63,9 +65,9 @@ node scripts/gemini-review.mjs > task/REVIEW.md
 把這輪學到的寫進 `task/MEMORY.md`（root cause、決策、被否決的方案），下輪不用重新理解。
 
 ## 鐵律
-- Reviewer（Gemini）的意見永遠只是「懷疑」，經驗證才算數。
+- Reviewer（GLM）的意見永遠只是「懷疑」，經驗證才算數。
 - 不可以說「完成」但沒跑過測試。
 - 不碰 SPEC 範圍外的檔案。
 - Scope 想擴大 → 停下來問，開新 SPEC，不要偷做。
-- 步驟 4 的 Gemini review 是強制步驟，無論改動多小都必須執行。
+- 步驟 4 的 GLM review 是強制步驟，無論改動多小都必須執行。
 - 沒有 task/REVIEW.md 存在，就不准寫 REPORT.md。
