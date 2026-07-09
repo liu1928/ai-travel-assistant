@@ -6,7 +6,15 @@ import { listPlaces } from "@/lib/collection";
 import { estimateLegs, resolveCoordinates, type TravelMode } from "@/lib/routes";
 import { guessCountry, holidaysInRange } from "@/lib/holidays";
 import { computeTravelDna } from "@/lib/travel-dna";
-import { flightSchema, carRentalSchema, type TripStyle, type Flight, type CarRental } from "@/schema/trip";
+import {
+  flightSchema,
+  carRentalSchema,
+  lodgingSchema,
+  type TripStyle,
+  type Flight,
+  type CarRental,
+  type Lodging,
+} from "@/schema/trip";
 import type { SavedPlace } from "@/schema/place";
 import { z } from "zod";
 
@@ -21,10 +29,12 @@ type Body = {
   startDate?: string; // YYYY-MM-DD
   flights?: unknown; // 使用者輸入的訂位資料，進來先過 zod
   carRentals?: unknown;
+  lodgings?: unknown;
 };
 
 const flightsArraySchema = z.array(flightSchema);
 const carRentalsArraySchema = z.array(carRentalSchema);
+const lodgingsArraySchema = z.array(lodgingSchema);
 
 const MODE_LABEL: Record<TravelMode, string> = {
   DRIVE: "開車",
@@ -61,6 +71,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "航班或租車資料格式不正確" }, { status: 400 });
     }
     carRentals = parsed.data;
+  }
+  let lodgings: Lodging[] = [];
+  if (body.lodgings !== undefined) {
+    const parsed = lodgingsArraySchema.safeParse(body.lodgings);
+    if (!parsed.success) {
+      return NextResponse.json({ error: "住宿資料格式不正確" }, { status: 400 });
+    }
+    lodgings = parsed.data;
   }
 
   let places: SavedPlace[] = [];
@@ -105,6 +123,7 @@ export async function POST(req: NextRequest) {
     holidays,
     flights,
     carRentals,
+    lodgings,
     dna,
   });
 
@@ -170,5 +189,5 @@ export async function POST(req: NextRequest) {
   }
 
   // 使用者輸入的訂位資料附掛回傳（AI 輸出本身不含，見 specs/flights-rentals.md §3）
-  return NextResponse.json({ trip: { ...trip, flights, carRentals } });
+  return NextResponse.json({ trip: { ...trip, flights, carRentals, lodgings } });
 }

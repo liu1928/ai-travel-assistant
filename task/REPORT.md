@@ -1,46 +1,48 @@
-<!-- 產生日期: 2026-07-10 | 產生模型: claude-opus-4-8 | 引用 REVIEW.md 時間戳: 2026-07-10 00:0x（Asia/Taipei）| 下次審視: 接 Booking Demand API（即時房價）或加日期/DNA 預算篩選前 -->
+<!-- 產生日期: 2026-07-10 | 產生模型: claude-opus-4-8 | 引用 REVIEW.md 時間戳: 2026-07-10 02:01:04 +0800 -->
 
-# REPORT — 住宿建議 + 訂房連結（②b）
+# REPORT — 住宿欄位（Lodging Field）
 
-> 任務來源：peanut 指示（多加住宿功能、串 Booking 給適合住宿；加價位篩選 + 錨定行程地理重心）。SPEC：`specs/lodging-suggest.md`。分支 `feat/lodging-suggest`（off main）。
-> 依 CLAUDE.md Executor 流程完成：實作 → 自我驗證 → GLM 審查（`task/REVIEW.md`）→ 仲裁 → 本報告。
-> **未宣告 Done——等 peanut 驗收。**
+> 依據 GLM 審查：`task/REVIEW.md`（時間戳 2026-07-10 02:01:04 +0800）。SPEC：`specs/lodging-field.md`。分支：`feat/lodging-field`。
 
-## 1. 改了哪些檔案（7 檔 + spec）
+## 做了什麼
+把「住宿」做成**第三種訂位資料**，完全比照既有 flights/carRentals：使用者手填已訂住宿 → 隨行程儲存/顯示/編輯 → 生成時當**硬約束**餵 AI（行程圍繞住宿排、晚上收在住宿附近、多住宿依日期分段）。`tripSchema`（AI 輸出）不動——住宿走「使用者輸入 → route 附掛」路徑，沿用防 AI 編造分層。舊 Firestore 文件靠 `.default([])` 零遷移。
 
-| 檔案 | 改動 |
+## 改動檔案（diff 摘要，見 task/diff.patch）
+| 檔案 | 變更 |
 |---|---|
-| `lib/booking-link.ts`（新） | `buildLodgingLink`：**可插拔變現**（Stay22 > Booking aid > Travelpayouts > 純連結），純函式、client/server 共用 |
-| `lib/lodging.ts`（新） | `suggestLodging`：Places 旅宿查詢 + **地理重心 locationBias** + **priceLevel 價位篩** + 每筆訂房連結 |
-| `app/api/lodging/suggest/route.ts`（新） | auth + `checkAndConsume` 限流 + `getTrip`/`listPlaces` 算**行程地理重心** + suggestLodging |
-| `app/trips/[id]/page.tsx` | 「🏨 住宿建議」區塊：價位下拉 + 「找住宿」+ 清單（名稱/⭐/價位/地址/訂房連結）+ 整區連結 |
-| `lib/__tests__/booking-link.test.ts`（新） | 四種變現 env 分支 + 中文/空白 encode + 日期，5 case |
-| `.env.example` | 加 `NEXT_PUBLIC_STAY22_AID` / `NEXT_PUBLIC_BOOKING_AID` / `NEXT_PUBLIC_TRAVELPAYOUTS_MARKER` |
-| `specs/lodging-suggest.md`（新） | 本功能 SPEC |
+| `schema/trip.ts` | 新增 `lodgingSchema`（name 必填，address/checkIn·Out Date·Time/note 可選，沿用 datePattern/timePattern）+ `Lodging` 型別；`tripWithBookingsSchema` 加 `lodgings: z.array(lodgingSchema).default([])` |
+| `components/bookings.tsx` | `LodgingDraft` 型別 + `emptyLodging`/`lodgingToDraft`/`isLodgingEmpty`；`draftsToBookings` 加第三參數 `lodgingDrafts` + 住宿驗證迴圈（缺 name 回 `{ok:false}`）；`BookingsResult` 加 `lodgings`；`BookingCards` 加 🏨 住宿唯讀卡；`BookingsFields` 加可收合「🏨 住宿資訊」動態清單（名稱*/地址/入住日·時/退房日·時/備註 + 新增/刪除） |
+| `lib/anthropic.ts` | `GenerateTripInput` 加 `lodgings?`；`buildUserMessage` 加住宿硬約束段（有資料才 push） |
+| `app/api/trip/generate/route.ts` | body 加 `lodgings?: unknown` → `z.array(lodgingSchema).safeParse`（失敗 400「住宿資料格式不正確」）→ 傳入 `generateTrip` → 回傳 `trip` 附掛 `lodgings` |
+| `app/trip/page.tsx` | `lodgingDrafts` state；`BookingsFields`/`draftsToBookings`/生成 payload/`BookingCards` 串接 |
+| `app/trips/[id]/page.tsx` | `lodgingDrafts` state；`startBookingsEdit` 用 `lodgingToDraft` 回填；`saveBookings` PATCH 帶 `lodgings`；`BookingCards` 顯示；編輯鈕文案改「航班/租車/住宿」 |
+| `schema/__tests__/trip.test.ts` | 新增 lodgingSchema 驗證（合法/缺 name/非法時間/非法日期）+ tripWithBookings 舊文件 default、含住宿完整行程、住宿缺 name 整筆拒絕、tripSchema 不含 lodgings |
 
-**做的事**：`/trips/[id]` 按「找住宿」→ 以**行程實際地理重心**（schedule 地點對照收藏座標算質心，零額外 API 成本）查 Places 旅宿、依評分排序、可依**價位篩**→ 每筆「訂房 →」deep-link。連結**不綁死聯盟商**：預設純 Booking（一定能用、無佣金），env 設了才帶佣金（**推薦 Stay22**，因 Booking 已終止部分聯盟合作）。Places 查詢走既有 $ 護欄。
+## 自我驗證（全過）
+- `pnpm typecheck`（tsc --noEmit）：**通過**，0 error。
+- `pnpm test`（vitest）：**9 檔 76 tests 全過**（含新增 lodging 測試）。
+- `pnpm lint`（eslint app lib schema）：**通過**，0 error。（components 不在 lint scope，由 typecheck 覆蓋。）
+- `pnpm build`（next build）：**通過**，exit 0，所有路由正常產出。
 
-## 2. 測試結果
-```
-pnpm typecheck  → ✓
-pnpm test       → ✓ 61 passed（新增 booking-link 5 case）
-pnpm lint       → ✓
-```
+## GLM finding 統計
+GLM 共提 🐛×2、⚠️×3、💡×2、❓×2（原文 + 逐條仲裁見 REVIEW.md）：
+- **假（FALSE POSITIVE）：2 條**
+  - 🐛-1 `isLodgingEmpty` 遇 undefined 崩潰 → `LodgingDraft` 全欄位為 `string`、draft 恆由 `emptyLodging`/`lodgingToDraft` 全填字串產生，`.trim()` 安全（與既有 isFlightEmpty/isRentalEmpty 同構）。
+  - 🐛-2 迴圈索引錯誤訊息誤導 → 空 draft 仍渲染成卡片，`第 i+1 筆` 與畫面卡片位置一致，不誤導（與 flights/carRentals 對稱）。
+- **真但不修（P2 / 屬既有全域特性、本 SPEC 範圍外）：3 條** — 見下方 Known issues。
+- **建議/疑問：4 條** — 風格建議不採納（維持與 flights/carRentals 對稱）；2 個疑問皆已釐清且設計正確（lodgingToDraft 安全、AI 不會編造座標——座標由後續 Google 地理編碼從 location 字串解析，非 AI 生成）。
+- **真的 P0/P1 缺陷：0 條** → 無新 diff，不需回步驟 3 重跑。
 
-## 3. GLM finding 統計（詳見 `task/REVIEW.md`）
-- 🐛 3：**2 FALSE POSITIVE**（送審用節略版把 stay22 分支/型別縮成註解 → 誤判「沒 return / any」；實際碼正確、typecheck 過）、1 不修（const 屬性修改合法、lint 過）
-- ⚠️ 6：**1 真已修**（listPlaces 失敗加 warn）、1 FALSE POSITIVE（open-redirect——連結 scheme+host 是硬編 https 字面量、query 經 encode，無注入）、1 已驗證安全（tripId 越權：getTrip 走 uid-scoped 路徑）、3 非問題/已知限制（換日線質心、日期未傳、name 比對）
-- 💡 3：**1 採納**（priceLevel 用 `in` 守未知 enum）、2 FALSE POSITIVE（節略）
-- ❓ 4：均已釐清
+註：GLM 的 `checkInTime:"25:99"` 具體例有誤——`timePattern` 已擋。
 
-## 4. Known issues / 待實測（部署後）
-- 實測：開「沖繩」且 schedule 地點多在收藏裡的行程 → 「找住宿」出**沖繩該區**旅宿（重心錨定）；價位選「$ 平價」→ 只剩 priceLevel≤1；`.env` 無變現 ID → 純 Booking 連結；狂按超 $ 護欄 → 429。
-- **無即時房價/空房**（deep-link，非 Demand API）——要即時價需 Booking Demand API（affiliate 審核）另開 spec。
-- **地理重心靠「schedule 名對照收藏」**：AI 生成、不在收藏又名稱對不上的點不計入（有 fallback 到 location 字串）；跨換日線行程質心會偏（台灣/亞洲非問題，spec §7 已載）。
-- Stay22/Travelpayouts 連結格式以各官方文件為準；使用者拿到 AID/marker 填進 env 重部署即帶佣金。
+## Known issues（交 peanut 決定，皆非本次 regression、非本 SPEC 範圍）
+1. **日期曆法/前後順序未驗證**：`datePattern` 接受 `2024-02-31` 這種不存在的日、且不驗 checkIn≤checkOut。與既有 flights/carRentals 同一慣例。若要 `.refine()` 強化，建議三種訂位資料一致地做，開獨立 SPEC。
+2. **buildUserMessage 無輸入隔離（prompt injection）**：整份 user message 本就由使用者輸入組成（prompt 欄位、地點名、flights/carRentals 的 note/company/location），lodging 未新增攻擊面；輸出受 tripSchema 約束、僅影響使用者自己的行程。建議開全域 prompt-hardening SPEC 一次處理。
+3. **訂位陣列無 `.max()` 上限**：generate route 已 requireUid + 限流，DoS 僅限已登入未超額者；flights/carRentals 亦無上限。建議三者一致加上限，屬對稱性強化。
 
-## 5. 部署
-合併進 main → App Hosting 自動 build/deploy。變現 env 未設也能用（純 Booking 連結）。
+## 待 peanut 驗收
+- 本地四項驗證 + build 全綠；未自行合併、未部署。
+- 尚未把此分支合入 main（等 peanut 指示）。合併後 Firebase App Hosting 會自動部署（`tripWithBookingsSchema` 加 `.default([])`，舊行程零遷移、開頁/PATCH 不炸）。
+- 下一個排程項目：`specs/flight-lookup.md`（AviationStack 帶航線+時刻），需動 Cloud Secret Manager + apphosting.yaml（禁動清單，動前會先與 peanut 確認）。
 
----
-**狀態：實作完成、驗收未過。等 peanut 確認後才可宣告 Done。**
+**停止，等待 peanut 驗收。不自行宣布 Done。**

@@ -72,9 +72,21 @@ export const carRentalSchema = z.object({
 });
 export type CarRental = z.infer<typeof carRentalSchema>;
 
+export const lodgingSchema = z.object({
+  name: z.string().min(1),
+  address: z.string().optional(),
+  checkInDate: z.string().regex(datePattern, "checkInDate 必須是 YYYY-MM-DD 格式").optional(),
+  checkInTime: z.string().regex(timePattern, "checkInTime 必須是 HH:mm 格式").optional(),
+  checkOutDate: z.string().regex(datePattern, "checkOutDate 必須是 YYYY-MM-DD 格式").optional(),
+  checkOutTime: z.string().regex(timePattern, "checkOutTime 必須是 HH:mm 格式").optional(),
+  note: z.string().optional(),
+});
+export type Lodging = z.infer<typeof lodgingSchema>;
+
 // 儲存/編輯用：Trip + 訂位資料。舊 Firestore 文件缺欄位 → default 補空陣列，免資料遷移。
 export const tripWithBookingsSchema = tripSchema.extend({
   flights: z.array(flightSchema).default([]),
   carRentals: z.array(carRentalSchema).default([]),
+  lodgings: z.array(lodgingSchema).default([]),
 });
 export type TripWithBookings = z.infer<typeof tripWithBookingsSchema>;

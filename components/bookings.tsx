@@ -3,7 +3,7 @@
 // 航班/租車的共用 UI：顯示卡（BookingCards）+ 動態清單編輯器（BookingsFields）。
 // /trip 生成表單與 /trips/[id] 編輯器共用，見 specs/flights-rentals.md §2.5。
 import { useState } from "react";
-import type { Flight, CarRental } from "@/schema/trip";
+import type { Flight, CarRental, Lodging } from "@/schema/trip";
 import { nextAirline } from "@/lib/airlines";
 
 // 表單草稿一律用字串，送出時經 draftsToBookings 轉成 schema 型別（空的可選欄位會被省略）
@@ -27,6 +27,15 @@ export type CarRentalDraft = {
   dropoffTime: string;
   note: string;
 };
+export type LodgingDraft = {
+  name: string;
+  address: string;
+  checkInDate: string;
+  checkInTime: string;
+  checkOutDate: string;
+  checkOutTime: string;
+  note: string;
+};
 
 export const emptyFlight = (): FlightDraft => ({
   flightNo: "", airline: "", from: "", to: "", date: "", departTime: "", arriveTime: "", note: "",
@@ -34,6 +43,9 @@ export const emptyFlight = (): FlightDraft => ({
 export const emptyRental = (): CarRentalDraft => ({
   company: "", pickupLocation: "", pickupDate: "", pickupTime: "",
   dropoffLocation: "", dropoffDate: "", dropoffTime: "", note: "",
+});
+export const emptyLodging = (): LodgingDraft => ({
+  name: "", address: "", checkInDate: "", checkInTime: "", checkOutDate: "", checkOutTime: "", note: "",
 });
 
 export const flightToDraft = (f: Flight): FlightDraft => ({
@@ -45,20 +57,27 @@ export const rentalToDraft = (r: CarRental): CarRentalDraft => ({
   pickupTime: r.pickupTime, dropoffLocation: r.dropoffLocation, dropoffDate: r.dropoffDate ?? "",
   dropoffTime: r.dropoffTime, note: r.note ?? "",
 });
+export const lodgingToDraft = (l: Lodging): LodgingDraft => ({
+  name: l.name, address: l.address ?? "", checkInDate: l.checkInDate ?? "", checkInTime: l.checkInTime ?? "",
+  checkOutDate: l.checkOutDate ?? "", checkOutTime: l.checkOutTime ?? "", note: l.note ?? "",
+});
 
 const isFlightEmpty = (d: FlightDraft) =>
   Object.values(d).every((v) => v.trim() === "");
 const isRentalEmpty = (d: CarRentalDraft) =>
   Object.values(d).every((v) => v.trim() === "");
+const isLodgingEmpty = (d: LodgingDraft) =>
+  Object.values(d).every((v) => v.trim() === "");
 
 export type BookingsResult =
-  | { ok: true; flights: Flight[]; carRentals: CarRental[] }
+  | { ok: true; flights: Flight[]; carRentals: CarRental[]; lodgings: Lodging[] }
   | { ok: false; message: string };
 
 // 全空的草稿直接略過；非空的草稿缺必填欄位 → 回錯誤訊息（不靜默丟掉，見 spec §3）
 export function draftsToBookings(
   flightDrafts: FlightDraft[],
   rentalDrafts: CarRentalDraft[],
+  lodgingDrafts: LodgingDraft[],
 ): BookingsResult {
   const flights: Flight[] = [];
   for (let i = 0; i < flightDrafts.length; i++) {
@@ -98,15 +117,34 @@ export function draftsToBookings(
     });
   }
 
-  return { ok: true, flights, carRentals };
+  const lodgings: Lodging[] = [];
+  for (let i = 0; i < lodgingDrafts.length; i++) {
+    const d = lodgingDrafts[i];
+    if (isLodgingEmpty(d)) continue;
+    if (!d.name.trim()) {
+      return { ok: false, message: `第 ${i + 1} 筆住宿缺少必填欄位（住宿名稱）` };
+    }
+    lodgings.push({
+      name: d.name.trim(),
+      ...(d.address.trim() ? { address: d.address.trim() } : {}),
+      ...(d.checkInDate ? { checkInDate: d.checkInDate } : {}),
+      ...(d.checkInTime ? { checkInTime: d.checkInTime } : {}),
+      ...(d.checkOutDate ? { checkOutDate: d.checkOutDate } : {}),
+      ...(d.checkOutTime ? { checkOutTime: d.checkOutTime } : {}),
+      ...(d.note.trim() ? { note: d.note.trim() } : {}),
+    });
+  }
+
+  return { ok: true, flights, carRentals, lodgings };
 }
 
 // --- 顯示卡（唯讀）---
 
-export function BookingCards({ flights, carRentals }: { flights?: Flight[]; carRentals?: CarRental[] }) {
+export function BookingCards({ flights, carRentals, lodgings }: { flights?: Flight[]; carRentals?: CarRental[]; lodgings?: Lodging[] }) {
   const hasFlights = !!flights && flights.length > 0;
   const hasRentals = !!carRentals && carRentals.length > 0;
-  if (!hasFlights && !hasRentals) return null;
+  const hasLodgings = !!lodgings && lodgings.length > 0;
+  if (!hasFlights && !hasRentals && !hasLodgings) return null;
 
   return (
     <div className="mb-4 space-y-3">
@@ -144,6 +182,26 @@ export function BookingCards({ flights, carRentals }: { flights?: Flight[]; carR
           </ul>
         </div>
       )}
+      {hasLodgings && (
+        <div className="rounded-lg border border-neutral-200 px-4 py-3">
+          <h3 className="mb-2 text-xs font-semibold text-neutral-500 uppercase tracking-wide">🏨 住宿</h3>
+          <ul className="space-y-1.5 text-sm text-neutral-800">
+            {lodgings.map((l, i) => (
+              <li key={i}>
+                <span className="font-medium">{l.name}</span>
+                {l.address && <span className="ml-1 text-xs text-neutral-400">{l.address}</span>}
+                {(l.checkInDate || l.checkInTime || l.checkOutDate || l.checkOutTime) && (
+                  <span className="ml-2 text-neutral-500">
+                    {l.checkInDate || l.checkInTime ? `${l.checkInDate ?? ""} ${l.checkInTime ?? ""} 入住` : ""}
+                    {l.checkOutDate || l.checkOutTime ? ` → ${l.checkOutDate ?? ""} ${l.checkOutTime ?? ""} 退房` : ""}
+                  </span>
+                )}
+                {l.note && <span className="ml-1 text-xs text-neutral-400">（{l.note}）</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
@@ -165,18 +223,23 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 export function BookingsFields({
   flights,
   rentals,
+  lodgings,
   onFlightsChange,
   onRentalsChange,
+  onLodgingsChange,
   defaultOpen = false,
 }: {
   flights: FlightDraft[];
   rentals: CarRentalDraft[];
+  lodgings: LodgingDraft[];
   onFlightsChange: (next: FlightDraft[]) => void;
   onRentalsChange: (next: CarRentalDraft[]) => void;
+  onLodgingsChange: (next: LodgingDraft[]) => void;
   defaultOpen?: boolean;
 }) {
   const [flightsOpen, setFlightsOpen] = useState(defaultOpen || flights.length > 0);
   const [rentalsOpen, setRentalsOpen] = useState(defaultOpen || rentals.length > 0);
+  const [lodgingsOpen, setLodgingsOpen] = useState(defaultOpen || lodgings.length > 0);
 
   const setFlight = (i: number, key: keyof FlightDraft, value: string) => {
     onFlightsChange(flights.map((f, idx) => (idx === i ? { ...f, [key]: value } : f)));
@@ -191,6 +254,9 @@ export function BookingsFields({
   };
   const setRental = (i: number, key: keyof CarRentalDraft, value: string) => {
     onRentalsChange(rentals.map((r, idx) => (idx === i ? { ...r, [key]: value } : r)));
+  };
+  const setLodging = (i: number, key: keyof LodgingDraft, value: string) => {
+    onLodgingsChange(lodgings.map((l, idx) => (idx === i ? { ...l, [key]: value } : l)));
   };
 
   return (
@@ -314,6 +380,71 @@ export function BookingsFields({
               className="rounded-lg border border-dashed border-neutral-300 px-3 py-1.5 text-xs text-neutral-500 hover:border-teal-500 hover:text-teal-700"
             >
               ＋ 新增租車
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div>
+        <button
+          type="button"
+          onClick={() => setLodgingsOpen((v) => !v)}
+          className="mb-2 flex items-center gap-1 text-xs font-medium text-neutral-500 hover:text-neutral-700"
+        >
+          <span>{lodgingsOpen ? "▾" : "▸"}</span> 🏨 住宿資訊（可選{lodgings.length > 0 ? `，${lodgings.length} 筆` : ""}）
+        </button>
+        {lodgingsOpen && (
+          <div className="space-y-3">
+            {lodgings.map((d, i) => (
+              <div key={i} className="rounded-lg border border-neutral-200 p-3">
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="col-span-2">
+                    <Field label="住宿名稱 *">
+                      <input value={d.name} onChange={(e) => setLodging(i, "name", e.target.value)} placeholder="那霸 ○○飯店" className={inputCls} />
+                    </Field>
+                  </div>
+                  <div className="col-span-2">
+                    <Field label="地址">
+                      <input value={d.address} onChange={(e) => setLodging(i, "address", e.target.value)} className={inputCls} />
+                    </Field>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Field label="入住日期">
+                      <input type="date" value={d.checkInDate} onChange={(e) => setLodging(i, "checkInDate", e.target.value)} className={inputCls} />
+                    </Field>
+                    <Field label="入住時間">
+                      <input type="time" value={d.checkInTime} onChange={(e) => setLodging(i, "checkInTime", e.target.value)} className={inputCls} />
+                    </Field>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Field label="退房日期">
+                      <input type="date" value={d.checkOutDate} onChange={(e) => setLodging(i, "checkOutDate", e.target.value)} className={inputCls} />
+                    </Field>
+                    <Field label="退房時間">
+                      <input type="time" value={d.checkOutTime} onChange={(e) => setLodging(i, "checkOutTime", e.target.value)} className={inputCls} />
+                    </Field>
+                  </div>
+                  <div className="col-span-2">
+                    <Field label="備註">
+                      <input value={d.note} onChange={(e) => setLodging(i, "note", e.target.value)} className={inputCls} />
+                    </Field>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onLodgingsChange(lodgings.filter((_, idx) => idx !== i))}
+                  className="mt-2 text-xs text-neutral-400 hover:text-red-600"
+                >
+                  刪除這筆住宿
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={() => onLodgingsChange([...lodgings, emptyLodging()])}
+              className="rounded-lg border border-dashed border-neutral-300 px-3 py-1.5 text-xs text-neutral-500 hover:border-teal-500 hover:text-teal-700"
+            >
+              ＋ 新增住宿
             </button>
           </div>
         )}

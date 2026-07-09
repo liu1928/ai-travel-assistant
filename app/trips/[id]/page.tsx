@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useAuth, authedFetch } from "@/lib/use-auth";
 import { GoogleSignInButton } from "@/components/google-signin";
-import type { Flight, CarRental } from "@/schema/trip";
+import type { Flight, CarRental, Lodging } from "@/schema/trip";
 import { buildLodgingLink } from "@/lib/booking-link";
 import {
   BookingCards,
@@ -13,8 +13,10 @@ import {
   draftsToBookings,
   flightToDraft,
   rentalToDraft,
+  lodgingToDraft,
   type FlightDraft,
   type CarRentalDraft,
+  type LodgingDraft,
 } from "@/components/bookings";
 
 type ScheduleItem = {
@@ -36,6 +38,7 @@ type SavedTrip = {
   budget: { min: number; max: number };
   flights?: Flight[];
   carRentals?: CarRental[];
+  lodgings?: Lodging[];
   createdAt: number;
 };
 
@@ -100,6 +103,7 @@ export default function TripViewPage() {
   const [editingBookings, setEditingBookings] = useState(false);
   const [flightDrafts, setFlightDrafts] = useState<FlightDraft[]>([]);
   const [rentalDrafts, setRentalDrafts] = useState<CarRentalDraft[]>([]);
+  const [lodgingDrafts, setLodgingDrafts] = useState<LodgingDraft[]>([]);
   const [savingBookings, setSavingBookings] = useState(false);
   const [bookingsError, setBookingsError] = useState<string | null>(null);
 
@@ -194,13 +198,14 @@ export default function TripViewPage() {
     if (view.status !== "ready") return;
     setFlightDrafts((view.trip.flights ?? []).map(flightToDraft));
     setRentalDrafts((view.trip.carRentals ?? []).map(rentalToDraft));
+    setLodgingDrafts((view.trip.lodgings ?? []).map(lodgingToDraft));
     setBookingsError(null);
     setEditingBookings(true);
   }
 
   async function saveBookings() {
     if (view.status !== "ready") return;
-    const bookings = draftsToBookings(flightDrafts, rentalDrafts);
+    const bookings = draftsToBookings(flightDrafts, rentalDrafts, lodgingDrafts);
     if (!bookings.ok) {
       setBookingsError(bookings.message);
       return;
@@ -208,7 +213,12 @@ export default function TripViewPage() {
     setSavingBookings(true);
     setBookingsError(null);
     try {
-      const updatedTrip = { ...view.trip, flights: bookings.flights, carRentals: bookings.carRentals };
+      const updatedTrip = {
+        ...view.trip,
+        flights: bookings.flights,
+        carRentals: bookings.carRentals,
+        lodgings: bookings.lodgings,
+      };
       const res = await authedFetch(`/api/trips/${view.trip.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -301,14 +311,20 @@ export default function TripViewPage() {
           <div className="mb-4">
             {!editingBookings ? (
               <>
-                <BookingCards flights={view.trip.flights} carRentals={view.trip.carRentals} />
+                <BookingCards
+                  flights={view.trip.flights}
+                  carRentals={view.trip.carRentals}
+                  lodgings={view.trip.lodgings}
+                />
                 <button
                   onClick={startBookingsEdit}
                   className="text-xs text-teal-700 hover:text-teal-900"
                 >
-                  {(view.trip.flights?.length ?? 0) > 0 || (view.trip.carRentals?.length ?? 0) > 0
-                    ? "編輯航班/租車"
-                    : "＋ 新增航班/租車"}
+                  {(view.trip.flights?.length ?? 0) > 0 ||
+                  (view.trip.carRentals?.length ?? 0) > 0 ||
+                  (view.trip.lodgings?.length ?? 0) > 0
+                    ? "編輯航班/租車/住宿"
+                    : "＋ 新增航班/租車/住宿"}
                 </button>
               </>
             ) : (
@@ -316,8 +332,10 @@ export default function TripViewPage() {
                 <BookingsFields
                   flights={flightDrafts}
                   rentals={rentalDrafts}
+                  lodgings={lodgingDrafts}
                   onFlightsChange={setFlightDrafts}
                   onRentalsChange={setRentalDrafts}
+                  onLodgingsChange={setLodgingDrafts}
                   defaultOpen
                 />
                 {bookingsError && (

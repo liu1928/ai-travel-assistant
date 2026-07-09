@@ -1,7 +1,7 @@
 // ⚠️ 伺服器端專用
 import Anthropic, { AnthropicError } from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
-import { tripSchema, type Trip, type TripStyle, type Flight, type CarRental } from "@/schema/trip";
+import { tripSchema, type Trip, type TripStyle, type Flight, type CarRental, type Lodging } from "@/schema/trip";
 import type { SavedPlace } from "@/schema/place";
 import type { TravelDna } from "./travel-dna"; // type-only：無 runtime 循環依賴
 import { ok, err, type Result } from "./result";
@@ -185,6 +185,7 @@ export type GenerateTripInput = {
   holidays?: HolidayInfo[]; // 行程期間當地假日（含前後緩衝）
   flights?: Flight[]; // 使用者已訂航班（硬約束）
   carRentals?: CarRental[]; // 使用者已訂租車
+  lodgings?: Lodging[]; // 使用者已訂住宿（硬約束，行程地理/時間錨點）
   dna?: TravelDna; // 使用者長期偏好畫像（收藏聚合）；缺席或收藏太少則不注入
 };
 
@@ -282,6 +283,26 @@ export function buildUserMessage(input: GenerateTripInput): string {
       .join("\n");
     parts.push(
       `租車資訊（已訂）：\n${lines}\n\n請據此安排：\n- 取車與還車各排入時間軸一項（type: transport）\n- 租車期間的移動以開車為主`,
+    );
+  }
+
+  if (input.lodgings && input.lodgings.length > 0) {
+    const lines = input.lodgings
+      .map((l) => {
+        const addr = l.address ? `（${l.address}）` : "";
+        const ci =
+          l.checkInDate || l.checkInTime ? `${l.checkInDate ?? ""} ${l.checkInTime ?? ""} 入住`.trim() : "";
+        const co =
+          l.checkOutDate || l.checkOutTime
+            ? ` → ${l.checkOutDate ?? ""} ${l.checkOutTime ?? ""} 退房`.replace(/\s+/g, " ").trimEnd()
+            : "";
+        const note = l.note ? `（${l.note}）` : "";
+        const times = ci || co ? `：${ci}${co}` : "";
+        return `- ${l.name}${addr}${times}${note}`;
+      })
+      .join("\n");
+    parts.push(
+      `住宿資訊（已訂，硬約束）：\n${lines}\n\n請據此安排：\n- 入住/退房排入對應那天的時間軸（type: place 或 rest）\n- 每天行程盡量在住宿可及範圍、晚上收在住宿附近\n- 有多筆住宿（換點）時，依日期把行程分段錨定到當晚的住宿`,
     );
   }
 
