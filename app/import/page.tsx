@@ -24,6 +24,23 @@ type ShareState =
 
 type TokenState = { status: "idle" | "loading" | "ready" | "error"; token?: string; message?: string };
 
+type ScoredCandidate = {
+  place: PlaceSearchResult;
+  tags: string[];
+  fitScore: number;
+  fitStars: number;
+  isGapFiller: boolean;
+  reason: string;
+  lowConfidence: boolean;
+};
+type InspirationState =
+  | { status: "idle" }
+  | { status: "analyzing" }
+  | { status: "preview"; items: ScoredCandidate[]; truncated: number; resolveFailed: number; selected: Set<string>; error?: string }
+  | { status: "confirming" }
+  | { status: "done"; summary: { success: number; skipped: number; failed: number } }
+  | { status: "error"; message: string };
+
 export default function ImportPage() {
   const { user, loading } = useAuth();
   const fileRef = useRef<HTMLInputElement>(null);
@@ -31,6 +48,62 @@ export default function ImportPage() {
   const [shareUrl, setShareUrl] = useState("");
   const [share, setShare] = useState<ShareState>({ status: "idle" });
   const [token, setToken] = useState<TokenState>({ status: "idle" });
+  const [inspText, setInspText] = useState("");
+  const [insp, setInsp] = useState<InspirationState>({ status: "idle" });
+
+  async function handleAnalyze() {
+    const text = inspText.trim();
+    if (!text) return;
+    setInsp({ status: "analyzing" });
+    try {
+      const res = await authedFetch("/api/import/inspiration", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      const data = (await res.json()) as { items?: ScoredCandidate[]; truncated?: number; resolveFailed?: number; error?: string };
+      if (!res.ok) throw new Error(data.error ?? "分析失敗");
+      const items = (data.items ?? []).slice().sort((a, b) => b.fitScore - a.fitScore);
+      // 預設勾選：高契合 + 補盲區（後者恆低星，不加會讓策展缺口這個賣點預設不被勾）
+      const selected = new Set(items.filter((i) => i.fitStars >= 4 || i.isGapFiller).map((i) => i.place.placeId));
+      setInsp({ status: "preview", items, truncated: data.truncated ?? 0, resolveFailed: data.resolveFailed ?? 0, selected });
+    } catch (e) {
+      setInsp({ status: "error", message: e instanceof Error ? e.message : "分析失敗" });
+    }
+  }
+
+  function toggleInsp(placeId: string) {
+    setInsp((prev) => {
+      if (prev.status !== "preview") return prev;
+      const selected = new Set(prev.selected);
+      if (selected.has(placeId)) selected.delete(placeId);
+      else selected.add(placeId);
+      return { ...prev, selected };
+    });
+  }
+
+  async function handleInspConfirm() {
+    if (insp.status !== "preview") return;
+    const preview = insp;
+    const chosen = preview.items.filter((i) => preview.selected.has(i.place.placeId));
+    if (chosen.length === 0) return;
+    setInsp({ status: "confirming" });
+    try {
+      const tags: Record<string, string[]> = {};
+      for (const c of chosen) tags[c.place.placeId] = c.tags;
+      const res = await authedFetch("/api/import/inspiration/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ places: chosen.map((c) => c.place), tags }),
+      });
+      const data = (await res.json()) as { summary?: { success: number; skipped: number; failed: number }; error?: string };
+      if (!res.ok || !data.summary) throw new Error(data.error ?? "收藏失敗");
+      setInsp({ status: "done", summary: data.summary });
+    } catch (e) {
+      // 保留預覽與勾選，讓使用者直接重試「批次收藏」，不必重跑昂貴的分析（重扣額度）
+      setInsp({ ...preview, error: e instanceof Error ? e.message : "收藏失敗" });
+    }
+  }
 
   async function handleTakeout(file: File) {
     setTakeout({ status: "loading" });
@@ -114,7 +187,101 @@ export default function ImportPage() {
       </div>
 
       <h1 className="text-2xl font-semibold tracking-tight text-neutral-900 mb-1">匯入地點</h1>
-      <p className="text-sm text-neutral-500 mb-10">從 Google Takeout、分享連結或 Chrome 擴充把地點帶進來。</p>
+      <p className="text-sm text-neutral-500 mb-10">貼一段別人的遊記讓 AI 用你的品味過濾，或從 Google Takeout、分享連結、Chrome 擴充把地點帶進來。</p>
+
+      <section className="mb-10">
+        <h2 className="text-sm font-semibold text-neutral-900 mb-1">✨ 貼靈感（AI 用你的品味過濾）</h2>
+        <p className="text-xs text-neutral-500 mb-4">
+          貼一段遊記／IG 貼文／景點清單，AI 抽出地點並對照你的 Travel DNA 給契合度評分，勾選喜歡的一鍵收藏。
+        </p>
+
+        <textarea
+          value={inspText}
+          onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setInspText(e.target.value)}
+          rows={5}
+          placeholder="把別人的遊記或景點清單貼進來，例如「這趟沖繩去了古宇利大橋、瀨長島、美國村…」"
+          className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+        />
+        <button
+          onClick={() => void handleAnalyze()}
+          disabled={!inspText.trim() || insp.status === "analyzing"}
+          className="mt-2 rounded-lg bg-teal-700 px-4 py-2 text-sm font-medium text-white hover:bg-teal-800 disabled:opacity-40 transition-colors"
+        >
+          {insp.status === "analyzing" ? "分析中…" : "分析"}
+        </button>
+
+        {insp.status === "error" && <p className="mt-3 text-sm text-red-600">{insp.message}</p>}
+
+        {insp.status === "preview" && (
+          <div className="mt-4">
+            {/* 交代地點去向（不靜默消失）：超上限略過 + 地圖找不到 */}
+            {(insp.truncated > 0 || insp.resolveFailed > 0) && (
+              <p className="mb-2 text-xs text-amber-600">
+                {insp.truncated > 0 && `地點太多，略過了 ${insp.truncated} 個。`}
+                {insp.resolveFailed > 0 && `有 ${insp.resolveFailed} 個在地圖上找不到，已略過。`}
+              </p>
+            )}
+            {insp.error && <p className="mb-2 text-sm text-red-600">{insp.error}</p>}
+            {insp.items.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-neutral-300 px-4 py-6 text-center text-sm text-neutral-500">
+                沒有從這段文字抽到可定位的地點，換一段試試。
+              </p>
+            ) : (
+              <>
+                <ul className="space-y-2">
+                  {insp.items.map((c) => (
+                    <li key={c.place.placeId} className="rounded-lg border border-neutral-200 px-3 py-2.5">
+                      <label className="flex cursor-pointer items-start gap-2.5">
+                        <input
+                          type="checkbox"
+                          checked={insp.selected.has(c.place.placeId)}
+                          onChange={() => toggleInsp(c.place.placeId)}
+                          className="mt-1 accent-teal-700"
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-medium text-neutral-900">{c.place.name}</span>
+                            <span className="text-xs text-amber-500">{"★".repeat(c.fitStars)}{"☆".repeat(5 - c.fitStars)}</span>
+                            {c.isGapFiller && <span className="rounded-full bg-violet-50 px-2 py-0.5 text-xs text-violet-700 ring-1 ring-inset ring-violet-200">補盲區</span>}
+                            {c.lowConfidence && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-700 ring-1 ring-inset ring-amber-200">請確認</span>}
+                          </span>
+                          {c.place.address && <span className="block truncate text-xs text-neutral-400">{c.place.address}</span>}
+                          <span className="mt-1 flex flex-wrap items-center gap-1.5">
+                            {c.tags.map((t) => (
+                              <span key={t} className="rounded-full bg-neutral-100 px-2 py-0.5 text-xs text-neutral-600">{t}</span>
+                            ))}
+                          </span>
+                          <span className="mt-1 block text-xs text-neutral-500">{c.reason}</span>
+                        </span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+                <button
+                  onClick={() => void handleInspConfirm()}
+                  disabled={insp.selected.size === 0}
+                  className="mt-3 rounded-lg bg-teal-700 px-4 py-2 text-sm font-medium text-white hover:bg-teal-800 disabled:opacity-40 transition-colors"
+                >
+                  批次收藏（{insp.selected.size}）
+                </button>
+              </>
+            )}
+          </div>
+        )}
+
+        {insp.status === "confirming" && <p className="mt-3 text-sm text-neutral-500">收藏中…</p>}
+        {insp.status === "done" && (
+          <div className="mt-3">
+            <p className="text-sm text-teal-700 font-medium">
+              已收藏 {insp.summary.success} 個{insp.summary.skipped > 0 && `・跳過 ${insp.summary.skipped} 個（已在收藏）`}
+              {insp.summary.failed > 0 && `・失敗 ${insp.summary.failed} 個`}
+            </p>
+            <Link href="/" className="mt-1 inline-block text-sm text-teal-700 underline hover:text-teal-900">
+              回收藏頁查看 →
+            </Link>
+          </div>
+        )}
+      </section>
 
       <section className="mb-10">
         <h2 className="text-sm font-semibold text-neutral-900 mb-1">Google Takeout</h2>

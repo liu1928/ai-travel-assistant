@@ -25,3 +25,7 @@ export const GLOBAL_DAILY_BUDGET_USD = numEnv("QUOTA_GLOBAL_DAILY_USD", 10);
 // 但一次合法大匯入（數百筆）不該被 $2 預算擋掉；改用筆數上限：放行一兩次大匯入、
 // 擋住「反覆大量匯入」把 Places 呼叫放大。預設 800，env 可覆寫。
 export const USER_DAILY_IMPORT_LIMIT = numEnv("QUOTA_USER_DAILY_IMPORTS", 800);
+
+// 全域每日匯入筆數熔斷（與 per-uid 同軸的 global）。匯入的 Places 成本不進 $ 全域熔斷
+// （estCostUsd），故另設全域筆數上限封住「跨使用者累積把 Places 放大」。預設 4000。
+export const GLOBAL_DAILY_IMPORT_LIMIT = numEnv("QUOTA_GLOBAL_DAILY_IMPORTS", 4000);
