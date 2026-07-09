@@ -2,9 +2,10 @@
 
 // 航班/租車的共用 UI：顯示卡（BookingCards）+ 動態清單編輯器（BookingsFields）。
 // /trip 生成表單與 /trips/[id] 編輯器共用，見 specs/flights-rentals.md §2.5。
-import { useState } from "react";
+import { useState, type Dispatch, type SetStateAction } from "react";
 import type { Flight, CarRental, Lodging } from "@/schema/trip";
 import { nextAirline } from "@/lib/airlines";
+import { authedFetch } from "@/lib/use-auth";
 
 // 表單草稿一律用字串，送出時經 draftsToBookings 轉成 schema 型別（空的可選欄位會被省略）
 export type FlightDraft = {
@@ -232,7 +233,7 @@ export function BookingsFields({
   flights: FlightDraft[];
   rentals: CarRentalDraft[];
   lodgings: LodgingDraft[];
-  onFlightsChange: (next: FlightDraft[]) => void;
+  onFlightsChange: Dispatch<SetStateAction<FlightDraft[]>>; // 支援 functional update：查航班回填時避免覆寫並行編輯
   onRentalsChange: (next: CarRentalDraft[]) => void;
   onLodgingsChange: (next: LodgingDraft[]) => void;
   defaultOpen?: boolean;
@@ -240,9 +241,51 @@ export function BookingsFields({
   const [flightsOpen, setFlightsOpen] = useState(defaultOpen || flights.length > 0);
   const [rentalsOpen, setRentalsOpen] = useState(defaultOpen || rentals.length > 0);
   const [lodgingsOpen, setLodgingsOpen] = useState(defaultOpen || lodgings.length > 0);
+  // 每筆航班「🔍 查航班」的狀態（以列索引為 key）：查詢中 / 成功「已帶入」/ 失敗訊息
+  const [lookup, setLookup] = useState<Record<number, { loading?: boolean; msg?: string; ok?: boolean }>>({});
 
   const setFlight = (i: number, key: keyof FlightDraft, value: string) => {
     onFlightsChange(flights.map((f, idx) => (idx === i ? { ...f, [key]: value } : f)));
+  };
+  // AviationStack 帶航線+時刻（真實 API、按鈕觸發、走用量護欄）。見 specs/flight-lookup.md。
+  // 成功：from/to/departTime/arriveTime 一律帶入；airline 僅當空才帶（不蓋第一層/手填）。
+  const lookupFlightRow = async (i: number) => {
+    const flightNo = flights[i]?.flightNo.trim() ?? "";
+    if (!flightNo) return;
+    setLookup((s) => ({ ...s, [i]: { loading: true } }));
+    try {
+      const res = await authedFetch("/api/flight/lookup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ flightNo }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        airline?: string; from?: string; to?: string; departTime?: string; arriveTime?: string; error?: string;
+      };
+      if (!res.ok) {
+        setLookup((s) => ({ ...s, [i]: { msg: data.error ?? "查詢失敗" } }));
+        return;
+      }
+      // functional update（讀最新 state）+ 身分守衛：查詢期間若使用者增刪/改動列，
+      // 只在「該列仍在 index i 且航班號未變」時回填，避免蓋到別列或覆寫並行編輯。
+      onFlightsChange((prev) =>
+        prev.map((f, idx) =>
+          idx === i && f.flightNo.trim() === flightNo
+            ? {
+                ...f,
+                from: data.from ?? f.from,
+                to: data.to ?? f.to,
+                departTime: data.departTime ?? f.departTime,
+                arriveTime: data.arriveTime ?? f.arriveTime,
+                airline: f.airline.trim() === "" && data.airline ? data.airline : f.airline,
+              }
+            : f,
+        ),
+      );
+      setLookup((s) => ({ ...s, [i]: { ok: true, msg: "已帶入" } }));
+    } catch (e) {
+      setLookup((s) => ({ ...s, [i]: { msg: e instanceof Error ? e.message : "查詢失敗" } }));
+    }
   };
   // 打航班號時用 IATA 代碼離線帶出航空公司名（見 nextAirline：不蓋手填、改代碼會更新/清掉 autofill 值）
   const setFlightNo = (i: number, value: string) => {
@@ -303,13 +346,28 @@ export function BookingsFields({
                     </Field>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => onFlightsChange(flights.filter((_, idx) => idx !== i))}
-                  className="mt-2 text-xs text-neutral-400 hover:text-red-600"
-                >
-                  刪除這筆航班
-                </button>
+                <div className="mt-2 flex items-center gap-3">
+                  <button
+                    type="button"
+                    disabled={!d.flightNo.trim() || lookup[i]?.loading}
+                    onClick={() => void lookupFlightRow(i)}
+                    className="rounded-lg border border-teal-600 px-2 py-1 text-xs text-teal-700 hover:bg-teal-50 disabled:opacity-40"
+                  >
+                    {lookup[i]?.loading ? "查詢中…" : "🔍 查航班"}
+                  </button>
+                  {lookup[i]?.msg && (
+                    <span className={`text-xs ${lookup[i]?.ok ? "text-teal-600" : "text-red-600"}`}>
+                      {lookup[i]?.msg}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => onFlightsChange(flights.filter((_, idx) => idx !== i))}
+                    className="ml-auto text-xs text-neutral-400 hover:text-red-600"
+                  >
+                    刪除這筆航班
+                  </button>
+                </div>
               </div>
             ))}
             <button

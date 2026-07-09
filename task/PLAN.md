@@ -1,43 +1,30 @@
-# PLAN — 登入錯誤顯示 + popup 失敗 fallback 到 redirect
+# PLAN — Flight Lookup（AviationStack 帶航線+時刻）
 
-> 任務來源：peanut 指示（正式站踩到「Google 登入沒反應」根因＝首頁 `void signInWithGoogle()` 吞掉錯誤；
-> 剛用「加 authorized domain」解了當下的 unauthorized-domain，本輪把「未來任何 auth 錯誤都看得到 + 更耐 popup/COOP」補起來）。
-> 上一輪 PLAN（反向策展）已 commit，git 歷史保留，本檔覆寫。分支 `feat/auth-error-surface`（off main）。
+> 任務來源：peanut「合併後接著做 AviationStack 航班查詢」。SPEC：`specs/flight-lookup.md`（已定稿）。
+> 這是航班 autofill 第二層（第一層＝離線帶航空公司名，已上線）。按鈕觸發、真實 API、走用量護欄。
+> 分支：`feat/flight-lookup`（off main a7d6dbd0）。
 
-## 問題
-- `signInWithGoogle()` = `await signInWithPopup(...)`，失敗直接丟例外。
-- 7 個頁面的登入鈕都是 `onClick={() => void signInWithGoogle()}` → **錯誤被 `void` 吞掉**，使用者看到「沒反應」也查不到原因（這次 `auth/unauthorized-domain` 就是這樣被埋掉）。
-- popup 在被封鎖 / COOP 情境下會失敗，沒有 fallback。
+## 步驟（>3 檔，先列計畫）
 
-## 做法
+1. **`lib/aviationstack.ts`（新）**：`lookupFlight(flightNo)` → `Result<FlightLookupResult, FlightLookupError>`；
+   純函式 `hhmmFromScheduled(scheduledIso, timezone?)` 把 **UTC instant 轉機場當地 HH:mm**
+   （`Intl.DateTimeFormat("en-GB", { timeZone, hour:"2-digit", minute:"2-digit", hourCycle:"h23" })`，
+   避免 midnight "24:00"）；timezone 缺/無效 → fallback 取 ISO `T` 後 5 碼。
+   airline 優先用第一層 `airlineFromFlightNo`（中文），無則 API `airline.name`。只取 `data[0]`。
+   缺 key → `missing_key`；空 data／缺 dep·arr → `not_found`；fetch/JSON/API error → `api_error`。
+2. **`lib/quotas.ts`**：`SERVICE_COST_USD` 加 `flight_lookup: 0.02`。
+3. **`app/api/flight/lookup/route.ts`（新）**：`requireUid` → `checkAndConsume("flight_lookup")` →
+   驗 `flightNo`（不像航班號 → 400）→ `lookupFlight`。not_found 404 / missing_key 500 / api_error 502。
+4. **`components/bookings.tsx`**：每筆航班加「🔍 查航班」鈕 + per-row loading/error state + `authedFetch`。
+   成功：`from/to/departTime/arriveTime` 一律帶入、`airline` 僅空才帶；失敗顯示該筆訊息。
+5. **`lib/__tests__/aviationstack.test.ts`（新）**：`hhmmFromScheduled` 單測（UTC→tz、跨日、midnight、
+   fallback 無 tz、無效 tz、異常字串）。
+6. **`.env.example`**：加 `AVIATIONSTACK_API_KEY` / `AVIATIONSTACK_BASE_URL`（註明免費方案設 http）。
 
-### 1. `lib/use-auth.ts`
-- `signInWithGoogle()` 改為：
-  - `try signInWithPopup`；
-  - **popup 被封鎖/環境不支援**（`auth/popup-blocked`、`operation-not-supported-in-this-environment`、`web-storage-unsupported`）→ **fallback `signInWithRedirect`**（整頁導頁）。
-  - **使用者關掉/重複點**（`popup-closed-by-user`、`cancelled-popup-request`、`user-cancelled`）→ 視為取消，不當錯誤（return）。
-  - 其餘（`unauthorized-domain`/`network-request-failed`/…）→ **throw 可讀中文訊息**（`authErrorMessage(code)`）讓 UI 顯示。
-- `useAuth()` effect 加 `getRedirectResult(auth).catch(console.warn)`：消化 redirect 回來的結果（成功由 `onAuthStateChanged` 接手），失敗記 log 不吞。
+## 驗證
+`pnpm typecheck && pnpm test && pnpm lint && pnpm build` → GLM review → REVIEW.md → 仲裁 → REPORT.md。
 
-### 2. `components/google-signin.tsx`（新）
-- `<GoogleSignInButton />`：內含 busy/error state，`await signInWithGoogle()` → catch 顯示紅字錯誤。沿用既有 teal 按鈕樣式（視覺不變），錯誤 `<p>` 顯示在按鈕下方。
-
-### 3. 7 個頁面替換登入鈕
-`app/page.tsx`（SignIn）、`app/import`、`app/trip`、`app/trips`、`app/trips/[id]`、`app/trips/[id]/expenses`、`app/dna`：
-- 把 `<button onClick={() => void signInWithGoogle()}>用 Google 登入</button>` 換成 `<GoogleSignInButton />`。
-- 各檔 import：移除已不用的 `signInWithGoogle`，加 `GoogleSignInButton`（`app/page.tsx` 保留 `signOutUser`）。
-
-## 設計決策
-- 只對「popup 環境問題」fallback redirect，不對所有錯誤 fallback（避免 unauthorized-domain 這種終端錯誤還去 redirect 又失敗、或非預期導頁）；終端錯誤改用「顯示可讀訊息」讓使用者/開發者看得到。
-- 共用元件消除 7 處重複的吞錯 pattern（DRY）。
-- 視覺不變（同 class）；只多了錯誤訊息與 busy 狀態。
-
-## 驗收
-```bash
-pnpm typecheck && pnpm test && pnpm lint
-```
-實測（部署後）：正常 popup 登入照舊；擋 popup（瀏覽器封鎖）→ 自動 redirect 登入；未授權網域 → 畫面顯示「網域未授權」而非沒反應。
-完成後：git diff → GLM review → REVIEW.md 仲裁 → REPORT.md → commit → push → PR。
-
-## 不在本輪
-- getRedirectResult 錯誤的 UI 顯示（本輪只 console.warn）。
+## ⚠️ 禁動清單（停下與 peanut 確認，不偷做）
+- **Cloud Secret Manager**：寫入 `AVIATIONSTACK_API_KEY`（值 `e273e5fae43bd144437d346fa6651e50`）。
+- **`apphosting.yaml`**：綁 secret + 視方案設 `AVIATIONSTACK_BASE_URL`（免費 → `http://api.aviationstack.com/v1`）。
+- → 程式碼全綠 + 審完後，把這兩步的**確切指令**列給 peanut 確認再執行；不在本輪自行寫入。
