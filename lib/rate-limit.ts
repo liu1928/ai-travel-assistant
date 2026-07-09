@@ -9,6 +9,7 @@ import {
   USER_DAILY_BUDGET_USD,
   GLOBAL_DAILY_BUDGET_USD,
   USER_DAILY_IMPORT_LIMIT,
+  GLOBAL_DAILY_IMPORT_LIMIT,
   type PaidService,
 } from "./quotas";
 
@@ -97,9 +98,10 @@ export async function checkAndConsume(
 }
 
 /**
- * 匯入以「筆數」計，對照 USER_DAILY_IMPORT_LIMIT（與 $ 預算不同維度，記在同一 usage doc 的
- * importCount 欄位）。複用純函式 decide：global 維度以 Infinity 關閉，只看 user 的 importCount vs limit。
- * fail-open 同 checkAndConsume。count<=0 直接放行。
+ * 匯入以「筆數」計（與 $ 預算不同維度，記在同一 usage doc 的 importCount 欄位）。
+ * per-uid 對照 USER_DAILY_IMPORT_LIMIT、全域對照 GLOBAL_DAILY_IMPORT_LIMIT——因為匯入的
+ * Places 成本不進 $ 全域熔斷（estCostUsd），故另設全域筆數熔斷封住跨使用者累積放大。
+ * 複用純函式 decide（importCount 當「成本」、limit 當「預算」）。fail-open 同 checkAndConsume。
  */
 export async function checkAndConsumeImports(
   uid: string,
@@ -110,15 +112,22 @@ export async function checkAndConsumeImports(
   const now = Date.now();
   const date = taipeiDate(now);
   const userRef = db().collection("usage").doc(`${uid}__${date}`);
+  const globalRef = db().collection("usage").doc(`__global__${date}`);
   try {
     return await db().runTransaction(async (tx) => {
-      const u = await tx.get(userRef);
-      const importCount = (u.data()?.importCount ?? 0) as number;
-      const verdict = decide(importCount, 0, n, USER_DAILY_IMPORT_LIMIT, Number.POSITIVE_INFINITY);
-      if (verdict !== "ok") {
+      const [u, g] = await Promise.all([tx.get(userRef), tx.get(globalRef)]);
+      const userCount = (u.data()?.importCount ?? 0) as number;
+      const globalCount = (g.data()?.importCount ?? 0) as number;
+      const verdict = decide(userCount, globalCount, n, USER_DAILY_IMPORT_LIMIT, GLOBAL_DAILY_IMPORT_LIMIT);
+      if (verdict === "circuit_open") {
+        return err({ kind: "circuit_open", scope: "global", retryAfterSec: secondsToTaipeiMidnight(now) });
+      }
+      if (verdict === "rate_limited") {
         return err({ kind: "rate_limited", scope: "user", retryAfterSec: secondsToTaipeiMidnight(now) });
       }
-      tx.set(userRef, { importCount: FieldValue.increment(n), updatedAt: now }, { merge: true });
+      const inc = { importCount: FieldValue.increment(n), updatedAt: now };
+      tx.set(userRef, inc, { merge: true });
+      tx.set(globalRef, inc, { merge: true });
       return ok(null);
     });
   } catch (e) {

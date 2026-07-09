@@ -25,7 +25,8 @@ const MAX_IMPORT = (() => {
 const FIELD_MASK =
   "places.id,places.displayName,places.formattedAddress,places.location,places.types,places.rating";
 
-async function resolve(c: ImportCandidate, apiKey: string): Promise<PlaceSearchResult | null> {
+// 名稱（+可選座標 bias）→ 真 place_id/座標。inspiration（反向策展）也複用這支。
+export async function resolveCandidate(c: ImportCandidate, apiKey: string): Promise<PlaceSearchResult | null> {
   const body: Record<string, unknown> = {
     textQuery: c.name,
     languageCode: "zh-TW",
@@ -102,7 +103,7 @@ export async function importCandidates(
     return summary;
   }
 
-  const resolved = await mapLimit(valid, 5, (c) => resolve(c, apiKey));
+  const resolved = await mapLimit(valid, 5, (c) => resolveCandidate(c, apiKey));
 
   const existing = await listPlaces(uid);
   const existingIds = new Set(existing.ok ? existing.value.map((p) => p.placeId) : []);

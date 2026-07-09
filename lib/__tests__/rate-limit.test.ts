@@ -41,12 +41,13 @@ describe("decide (每日用量判定)", () => {
     expect(decide(2.5, 0, 0, USER, GLOBAL)).toBe("rate_limited"); // 已超額：0 成本不會把它救回放行
   });
 
-  // checkAndConsumeImports 複用 decide：global 維度以 Infinity 關閉，只看 user 的匯入筆數 vs 上限。
-  it("匯入維度：global=Infinity 時只看 user 額度", () => {
-    const LIMIT = 800;
-    expect(decide(700, 0, 50, LIMIT, Number.POSITIVE_INFINITY)).toBe("ok"); // 750 <= 800
-    expect(decide(700, 0, 200, LIMIT, Number.POSITIVE_INFINITY)).toBe("rate_limited"); // 900 > 800
-    expect(decide(0, 999999, 300, LIMIT, Number.POSITIVE_INFINITY)).toBe("ok"); // global 不觸發
+  // checkAndConsumeImports 複用 decide：per-uid 對 USER_DAILY_IMPORT_LIMIT、全域對 GLOBAL_DAILY_IMPORT_LIMIT。
+  it("匯入維度：user + global 兩軸（複用 decide）", () => {
+    const U = 800;
+    const G = 4000;
+    expect(decide(700, 3000, 50, U, G)).toBe("ok"); // 兩軸都未超
+    expect(decide(700, 3000, 200, U, G)).toBe("rate_limited"); // user 900 > 800
+    expect(decide(100, 3900, 200, U, G)).toBe("circuit_open"); // global 4100 > 4000（優先）
   });
 });
 
