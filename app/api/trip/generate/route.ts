@@ -133,16 +133,28 @@ export async function POST(req: NextRequest) {
       const stops = day.schedule.filter((s) => s.type === "place" || s.type === "food");
       const coords: { lat: number; lng: number }[] = [];
 
+      // 任一 stop 定位失敗就整天跳過估計——不可壓縮 coords，否則把
+      // A→(定位失敗的 B)→C 當成 A→C 直算，移動時間會被系統性低估（對應錯位）。
+      let allResolved = true;
       for (const stop of stops) {
         const known = placeByName.get(stop.location ?? stop.title);
         if (known) {
           coords.push(known.location);
         } else {
           const resolved = await resolveCoordinates(stop.location ?? stop.title);
-          if (resolved) coords.push(resolved);
+          if (resolved) {
+            coords.push(resolved);
+          } else {
+            allResolved = false;
+            break;
+          }
         }
       }
 
+      if (!allResolved) {
+        trip.insights.push(`第 ${day.day} 天有地點無法定位，未估移動時間`);
+        continue;
+      }
       if (coords.length < 2) continue;
 
       const legs = await estimateLegs(coords, mode);

@@ -1,11 +1,24 @@
 // ⚠️ 伺服器端專用：共用匯入核心（名稱 → 真 place_id+座標 → 批次標籤 → 存）
-import { tagPlaces } from "./tagging";
+import { tagPlaces, TAG_BATCH_SIZE } from "./tagging";
 import { addPlace, listPlaces } from "./collection";
-import { mapLimit } from "./concurrency";
-import type { PlaceSearchResult } from "@/schema/place";
+import { mapLimit, chunk } from "./concurrency";
+import { envOr } from "./env";
+import type { PlaceSearchResult, PlaceTag } from "@/schema/place";
 
 export type ImportCandidate = { name: string; lat?: number; lng?: number };
-export type ImportSummary = { success: number; skipped: number; failed: number; invalid: number };
+export type ImportSummary = {
+  success: number;
+  skipped: number;
+  failed: number;
+  invalid: number;
+  truncated: number; // 因超過單次上限被丟棄的筆數（>0 時前端要提示）
+};
+
+// 單次匯入上限：防 Takeout 上千筆一次放大 Places/Anthropic 成本。NaN/非正 → 退回 300。
+const MAX_IMPORT = (() => {
+  const n = Number(envOr("MAX_IMPORT_PER_REQUEST", "300"));
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 300;
+})();
 
 const FIELD_MASK =
   "places.id,places.displayName,places.formattedAddress,places.location,places.types,places.rating";
@@ -60,14 +73,18 @@ export async function importCandidates(
   candidates: ImportCandidate[],
 ): Promise<ImportSummary> {
   const apiKey = process.env.GOOGLE_MAPS_API_KEY;
-  const summary: ImportSummary = { success: 0, skipped: 0, failed: 0, invalid: 0 };
+  const summary: ImportSummary = { success: 0, skipped: 0, failed: 0, invalid: 0, truncated: 0 };
   if (!apiKey) {
     summary.failed = candidates.length;
     return summary;
   }
 
-  const valid = candidates.filter((c) => c.name && c.name.trim().length >= 2);
-  summary.invalid = candidates.length - valid.length;
+  const validAll = candidates.filter((c) => c.name && c.name.trim().length >= 2);
+  summary.invalid = candidates.length - validAll.length;
+
+  // 上限截斷：只處理前 MAX_IMPORT 筆，其餘計入 truncated（前端提示分批）。
+  const valid = validAll.slice(0, MAX_IMPORT);
+  summary.truncated = validAll.length - valid.length;
 
   const resolved = await mapLimit(valid, 5, (c) => resolve(c, apiKey));
 
@@ -83,8 +100,15 @@ export async function importCandidates(
     toSave.push(p);
   }
 
-  const tagsResult = await tagPlaces(toSave);
-  const tagsList = tagsResult.ok ? tagsResult.value : toSave.map(() => []);
+  // 分批標籤：每批獨立成敗（某批 err → 該批空標籤，可被「重新標籤」再試），
+  // 且每批遠低於 max_tokens，避免截斷造成尾段靜默空標籤（見 tagging.ts alignBatchTags）。
+  const tagsList: PlaceTag[][] = [];
+  for (const batch of chunk(toSave, TAG_BATCH_SIZE)) {
+    const r = await tagPlaces(batch);
+    // 降級不靜默：記一行 warn（該批以空標籤存入，可被「重新標籤」再試）— GLM REVIEW 🐛-1。
+    if (!r.ok) console.warn("[import] 批次標籤失敗，該批暫存空標籤：", r.error.kind);
+    tagsList.push(...(r.ok ? r.value : batch.map(() => [])));
+  }
 
   await mapLimit(toSave, 5, async (p, i) => {
     const saved = await addPlace(uid, p, tagsList[i] ?? []);
