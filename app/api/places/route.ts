@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { searchPlaces, type PlacesError } from "@/lib/places";
 import { requireUid } from "@/lib/auth";
+import { checkAndConsume, rateLimitHttp } from "@/lib/rate-limit";
 
 function describe(e: PlacesError): { status: number; message: string } {
   switch (e.kind) {
@@ -20,6 +21,12 @@ function describe(e: PlacesError): { status: number; message: string } {
 export async function POST(req: NextRequest) {
   const auth = await requireUid(req);
   if (!auth.ok) return NextResponse.json({ error: auth.error.message }, { status: 401 });
+
+  const gate = await checkAndConsume(auth.value, "places_search");
+  if (!gate.ok) {
+    const { status, message, retryAfterSec } = rateLimitHttp(gate.error);
+    return NextResponse.json({ error: message }, { status, headers: { "Retry-After": String(retryAfterSec) } });
+  }
 
   const body = (await req.json().catch(() => null)) as { query?: unknown } | null;
   const query = typeof body?.query === "string" ? body.query.trim() : "";

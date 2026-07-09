@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireUid } from "@/lib/auth";
+import { checkAndConsume, rateLimitHttp } from "@/lib/rate-limit";
 import { generateTrip, type HolidayInfo } from "@/lib/anthropic";
 import { listPlaces } from "@/lib/collection";
 import { estimateLegs, resolveCoordinates, type TravelMode } from "@/lib/routes";
@@ -33,6 +34,12 @@ const MODE_LABEL: Record<TravelMode, string> = {
 export async function POST(req: NextRequest) {
   const auth = await requireUid(req);
   if (!auth.ok) return NextResponse.json({ error: auth.error.message }, { status: 401 });
+
+  const gate = await checkAndConsume(auth.value, "trip_generate");
+  if (!gate.ok) {
+    const { status, message, retryAfterSec } = rateLimitHttp(gate.error);
+    return NextResponse.json({ error: message }, { status, headers: { "Retry-After": String(retryAfterSec) } });
+  }
 
   const body = (await req.json().catch(() => null)) as Body | null;
   if (!body) return NextResponse.json({ error: "請求格式錯誤" }, { status: 400 });
