@@ -5,6 +5,7 @@ import { generateTrip, type HolidayInfo } from "@/lib/anthropic";
 import { listPlaces } from "@/lib/collection";
 import { estimateLegs, resolveCoordinates, type TravelMode } from "@/lib/routes";
 import { guessCountry, holidaysInRange } from "@/lib/holidays";
+import { computeTravelDna } from "@/lib/travel-dna";
 import { flightSchema, carRentalSchema, type TripStyle, type Flight, type CarRental } from "@/schema/trip";
 import type { SavedPlace } from "@/schema/place";
 import { z } from "zod";
@@ -87,6 +88,12 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // best-effort：使用者長期偏好畫像（查不到不影響生成，比照 holidays/Routes 降級）。
+  // DNA 失敗 = 個人化整層失效（比假日更有感），故留一行 warn 供觀測（GLM REVIEW ❓-1）。
+  const dnaResult = await computeTravelDna(auth.value);
+  if (!dnaResult.ok) console.warn("[trip/generate] DNA 降級：", dnaResult.error.message);
+  const dna = dnaResult.ok ? dnaResult.value : undefined;
+
   const result = await generateTrip({
     prompt: body.prompt,
     places,
@@ -98,6 +105,7 @@ export async function POST(req: NextRequest) {
     holidays,
     flights,
     carRentals,
+    dna,
   });
 
   if (!result.ok) {

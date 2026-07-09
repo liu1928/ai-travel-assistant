@@ -1,104 +1,89 @@
-# task/REVIEW.md — GLM-5.2 異質審查
+# task/REVIEW.md — GLM-5.2 異質審查（Persona Mode）
 
-- 時間戳：2026-07-09 17:3x（Asia/Taipei）
-- 審查範圍：Foundation Hardening 項目 A（每日用量護欄）本次 diff
-  - 新增 `lib/quotas.ts`、`lib/rate-limit.ts`、`lib/__tests__/rate-limit.test.ts`、`firestore.rules`
-  - 8 個付費 route 插入 gate、`firebase.json` 掛 firestore、`.env.example` 加 quota 變數
-- Reviewer：MCP `glm-reviewer` `review_code`，focus=`security`
-- ⚠️ Reviewer 意見僅為「懷疑」，以下先原封記錄，再逐條仲裁（實際驗證後才算數）。
+- 時間戳：2026-07-09 17:5x（Asia/Taipei）
+- 審查範圍：分身模式（Travel DNA 注入生成）本次 diff
+  - `lib/anthropic.ts`（GenerateTripInput 加 dna、buildUserMessage 畫像段、SYSTEM_PROMPT V3 改寫、export buildUserMessage）
+  - `app/api/trip/generate/route.ts`（best-effort computeTravelDna 傳入）
+  - `lib/__tests__/anthropic.test.ts`（新）
+- Reviewer：MCP `glm-reviewer` `review_code`，focus=（全面）
+- ⚠️ Reviewer 意見僅為「懷疑」，先原封記錄，再逐條仲裁。
 
 ---
 
 ## 一、GLM 原始回覆（原封不動）
 
-這份程式碼在「單人低併發」與「fail-open 刻意決策」的前提下，邏輯大致正確，但以 security 角度審視，存在幾個嚴重的防護盲點與設計瑕疵。
-
 ### 🐛 問題點
-
-**1. `decide` 函式未防範負數成本，導致限流繞過**
-`checkAndConsume` 的 `cost` 參數預設值來自 `SERVICE_COST_USD[service]`，但函式簽名允許傳入任意 `cost`。如果呼叫端傳入負數（例如 `checkAndConsume(uid, "places_search", -1)`），`decide` 函式中的 `userCost + cost` 與 `globalCost + cost` 會被扣減。攻擊者若找到能傳入負數的路徑，或者未來開發新功能時不慎傳入，將使 `estCostUsd` 歸零甚至變成負數，徹底繞過每日預算限制。
-`decide` 必須加入防禦：`if (cost <= 0) return "circuit_open";` 或在 `checkAndConsume` 起點就 `return err`。
-
-**2. `numEnv` 解析邏輯瑕疵，導致小數預算失效**
-`Number(envOr(key, String(def)))` 在 `def` 為小數（如 `0.5`）時，`String(0.5)` 是 `"0.5"`，這沒問題。但若未來有人傳入科學記號或開發者在本機設定 `QUOTA_USER_DAILY_USD=0.5.5`，`Number` 會解析出 `NaN`，此時 `Number.isFinite(n)` 會是 false，這算正確防呆。但真正的問題在於：如果環境變數設為 `0`，`n > 0` 為 false，會退回 `def`。這在 fail-open 語境下是危險的——如果維運人員想「暫時關閉付費 API」而設定 `QUOTA_GLOBAL_DAILY_USD=0`，系統會默默退回預設的 10 美元繼續放行，而不是熔斷。
+無。
 
 ### ⚠️ 風險
 
-**1. Firestore Transaction 無法保證強一致性，存在超支風險**
-Firestore 的 `runTransaction` 會在文件衝突時重試。但在 `maxInstances: 2` 的環境下，若兩個請求同時讀取到 `globalCost = 9.98`，且 `cost = 0.02`，兩者都會判斷 `9.98 + 0.02 <= 10` 並嘗試寫入。Firestore 會偵測到衝突並重試其中一個，重試時會重新讀取到 `10.00`，此時 `10.00 + 0.02 > 10` 會正確觸發 `circuit_open`。**這部分邏輯是正確的**。
-但真正的風險在於：如果未來專案升級或放寬 `maxInstances`，Firestore Transaction 的樂觀鎖在高併發下會導致大量重試，最終可能因為重試次數耗盡而拋出例外。由於你的 `catch` 是 fail-open，這會導致所有請求在高峰期免費放行。
+1. **`Math.round` 導致 0% 偏好標籤出現的邊界錯誤**
+   `tagCounts` 雖然已過濾掉 `count === 0`，但若使用者收藏的總地點數極大，某個標籤的 `ratio` 可能極小（例如 `0.004`）。`Math.round(0.004 * 100)` 會得到 `0`，導致 prompt 印出「溫泉 0%」，這在語意上極度荒謬且會干擾模型理解。應改為 `Math.max(1, Math.round(...))` 確保最小百分比為 1，或在 ratio 過低時直接捨棄該標籤。
 
-**2. `retryAfterSec` 與 HTTP Header 的 Timezone 漂移風險**
-`secondsToTaipeiMidnight` 使用 `now + 8 * 3600_000` 計算，這在伺服器端是對的。但 `Retry-After` HTTP Header 的語意是「客戶端應該在 N 秒後重試」。如果客戶端（如手機 App）的系統時區不是 UTC+8，它收到 `Retry-After: 3600` 後，當地時間可能還沒到午夜，重試依然會被擋下。這不是 security 漏洞，但會導致客戶端無謂重試，增加伺服器負擔。
+2. **「每天 1 個反 DNA 驚喜位」可能導致 token 成本與輸出截斷**
+   專案目前 `max_tokens` 設為 4096。現在要求每個景點都要寫「為你而選」的理由，且每天還要額外生成一個「反 DNA 探索點」並附帶破框說明。這大幅增加了模型在 `description` 欄位的輸出量。若使用者請求產生 7~10 天的行程，結構化輸出（JSON）的 token 量極可能逼近或超過 4096，導致 JSON 被截斷、`zodOutputFormat` parse 失敗，最終引發系統錯誤。建議重新評估 `max_tokens` 是否需提升，或限制驚喜位的生成頻率。
 
-**3. 缺少對 `uid` 的格式驗證**
-`checkAndConsume(uid: string, ...)` 直接將 `uid` 拼接進 Firestore Document ID：`${uid}__${date}`。雖然 `uid` 來自 `requireUid`，但如果 Auth SDK 驗證邏輯未來被改動，或 `uid` 包含 `/` 或特殊字元，可能會導致 Firestore Document Path 解析異常。應在函式入口斷言 `uid` 不包含 `__` 與路徑保留字。
+3. **冷啟動門檻判斷條件重複且分散**
+   `input.dna && input.dna.totalPlaces >= DNA_MIN_PLACES && input.dna.tagCounts.length > 0` 這段判斷寫在 `buildUserMessage` 內。雖然 `route.ts` 透過 best-effort 拿到 `dna` 後直接傳入，但 `TravelDna` 的型別允許 `totalPlaces` 或 `tagCounts` 為 0。若未來有其他呼叫端傳入剛好 4 個收藏的 `dna`，這裡的防護是有效的。但這導致「是否要注入 DNA」的業務邏輯耦合在純粹的字串組裝函式中，未來維護時可能會忽略這層隱性門檻。
 
 ### 💡 建議
 
-**1. 確保 `cost` 不可被外部覆蓋**
-既然 `SERVICE_COST_USD` 是固定的 `as const` 表，`checkAndConsume` 的 `cost` 參數應該移除，直接在函式內部讀取 `SERVICE_COST_USD[service]`。這可以完全消除人為傳錯或被惡意傳入負數的風險。
+1. **集中冷啟動判斷邏輯**
+   與其在 `buildUserMessage` 裡寫 `if (input.dna && input.dna.totalPlaces >= DNA_MIN_PLACES && ...)`，不如在 `route.ts` 取得 `dna` 後，直接判斷並傳入 `undefined`：
+   ```ts
+   const dnaResult = await computeTravelDna(auth.value);
+   const rawDna = dnaResult.ok ? dnaResult.value : undefined;
+   const dna = rawDna && rawDna.totalPlaces >= DNA_MIN_PLACES ? rawDna : undefined;
+   ```
+   讓 `buildUserMessage` 只需單純檢查 `if (input.dna)`，維持其作為「純函式」的職責單一性，將「冷啟動門檻」的商業邏輯收攏至 route 層。
 
-**2. `firestore.rules` 的縱深防禦可以更嚴格**
-`usage/**` 與 `users/{uid}/**` 皆 `allow read, write: if false` 是好的。但建議明確禁止 `list` 操作：
-```
-match /usage/{doc} {
-  allow read, write, list: if false;
-}
-```
-雖然 Admin SDK 不受 rules 限制，但若未來有其他 client SDK 誤用，`list` 可能會洩漏所有使用者的每日用量統計。
+2. **避免在 prompt 字串中過度使用「」等標點**
+   `「為你而選」`、`「略微跳出既有偏好」` 這些引號在 prompt 中並非必要，模型理解自然語言不需要這些強調符號，這只會增加無意義的 token 消耗。直接寫「每個景點的 description 至少有一句為你而選的理由...」即可。
 
 ### ❓ 待釐清問題
 
-1. **`requireUid` 是否依賴 Firebase Auth Session Token？** 如果是，外洩的 Bearer Token 在過期前依然可以瘋狂打 API。本功能只是「延緩」帳單失控，無法「阻止」。這是否符合專案預期？
-2. **為何 `checkAndConsume` 要將 `cost` 設為可選參數？** 這是否預留了未來讓某些 API 呼叫端「自定義成本」的需求？如果有，這會是個安全破口，因為呼叫端可以傳 `0` 來規避限流。
-3. **`firestore.rules` 是否有針對 `usage` 集合的文件 ID 格式做驗證？** 例如限制只能是 `*__*` 格式，防止未來其他 Admin SDK 邏輯誤寫入非預期格式的文件？
+1. **`computeTravelDna` 的失敗是否真的完全無聲？**
+   `route.ts` 寫了 `const dna = dnaResult.ok ? dnaResult.value : undefined;`，這代表 `computeTravelDna` 失敗時（例如 Firestore 查詢超時），系統會默默降級。這是否符合預期？還是應該至少記錄 log（例如 console.warn 或 telemetry），以便觀察 DNA 聚合功能的可用性？背景說明提到「比照 holidays/Routes 降級」，但 holidays 降級可能只是少放國定假日，DNA 降級則是讓「個人化」直接失效，這兩者的衝擊程度是否對等？
+
+2. **`summary` 是否有被注入惡意提示詞的風險？**
+   `input.dna.summary` 被直接插入 prompt 字串中。這個 `summary` 是由系統生成的，還是可能包含了使用者輸入的自由文字（例如使用者自訂的收藏標籤名稱或備註）？如果是後者，直接插入字串可能會成為 Prompt Injection 的攻擊向量，破壞原本的結構化輸出意圖。
 
 ---
 
 ## 二、仲裁（逐條實際驗證）
 
-### 🐛-1 負數 cost 繞過限流 → **真（P1，已修）**
-- 驗證：`cost` 是可選參數（item B 逐筆計費會用到，不移除），現有 8 個呼叫端都用預設值。但傳負數確實會讓 `decide` 的 `userCost + cost` 變小，甚至把 Firestore 計數往下扣，繞過限流。雖然 `cost` 全由伺服器端程式決定（非攻擊者可控），但這是真實防禦缺口，且未來 item B 傳入 `單價 × 筆數` 時若筆數算錯可能為負。
-- 處置：**在 `checkAndConsume` 起點 clamp `const spend = Math.max(0, cost)`**（保留參數供 item B，同時杜絕負數；`0` 合法代表「本次無付費工作」，放行且不扣款）。新增 `decide` 對 `cost=0` 的回歸測試。
+### ⚠️-1 `Math.round` 印成 0% → **真（採納，順手一行）**
+- 驗證：`slice(0,4)` 取的是 count 最高的前 4 個 tag，且只有 10 個固定 tag，top-4 ratio 極難低到 0.5% 以下；但確為可能的醜陋邊界，且修法是一行。
+- 處置：改 `Math.max(1, Math.round(t.ratio * 100))`。
 
-### 🐛-2 `QUOTA=0` 退回預設而非熔斷 → **P2（不修，設計取捨 + 文件化替代法）**
-- 驗證屬實：`n > 0` 會讓 `0` 退回預設。但這是**刻意**的：`0`／負數視為無效設定 → 退回安全預設，避免一個 typo（`QUOTA=0`）就把全站付費功能打死。
-- 「緊急關閉付費 API」有更安全做法：設極小正值（如 `QUOTA_GLOBAL_DAILY_USD=0.001`），第一次呼叫成本 `0.02 > 0.001` 即 `circuit_open` 熔斷。**已於 REPORT/PLAN 記錄此 kill-switch 用法**，不改 `numEnv` 語意。
+### ⚠️-2 max_tokens 4096 截斷風險 → **真（採納，我的改動加劇既有風險）**
+- 驗證：分身模式讓每個 place/food stop 多「一句為你而選」+ 每天一個探索點，確實增加 `description` 輸出量；長天數行程 JSON 逼近 4096 → 截斷 → parse 失敗 → 假性 refusal。survey 本就列此為既有風險，我的改動加劇它。
+- 處置：`max_tokens` 4096 → 8192（Sonnet 4.6 支援遠高於此，保守上調；直接消除本次引入的回歸）。
 
-### ⚠️-1 Transaction 一致性 → **FALSE POSITIVE（現況正確；未來已記錄）**
-- Reviewer 自己確認「這部分邏輯是正確的」。`runTransaction` 樂觀鎖在 `maxInstances:2` 下正確。所述為「未來放大實例數」的假設情境，`specs/foundation-hardening.md §11` 已記錄「未來放大實例數需重估」。**現況非 bug，不修。**
+### ⚠️-3 / 💡-1 冷啟動門檻耦合在純函式 → **不採納（設計取捨，附理由）**
+- 反對移到 route：把 guard 留在 `buildUserMessage` 讓它**對任何呼叫端 correct-by-construction**——未來任何 caller（如 eval、批次、之後的 party 生成）傳入低於門檻的 dna 都不會誤注入雜訊畫像；且單測正是直接驗這個門檻。移到 route 反而讓 `buildUserMessage` 在「dna 存在就注入」，把防線外包給每個呼叫端記得先過濾，較脆弱。`buildUserMessage` 仍是純函式（無副作用、輸入決定輸出），職責單一性未破。**維持現狀。**
 
-### ⚠️-2 `Retry-After` 時區漂移 → **FALSE POSITIVE**
-- `Retry-After: <秒數>`（delta-seconds 形式）語意就是「從現在起等 N 秒」，**與客戶端時區無關**。`secondsToTaipeiMidnight` 回的正是「距配額重置（台北午夜 = `taipeiDate` 跨日）還有幾秒」，兩者精準對齊。客戶端等滿該秒數，配額桶就換日。Reviewer 把 delta-seconds 誤解為「重試於某牆鐘時刻」。**不修。**
+### 💡-2 移除「」引號省 token → **不採納（可讀性 > 幾個 token）**
+- 「為你而選」的引號是**把該片語標成模型該用的固定 label**，有助指令清晰；成本是個位數 token，可忽略。維持。
 
-### ⚠️-3 / ❓-3 `uid` 格式驗證 / doc ID 碰撞 → **P2（不修）**
-- `uid` 來自 Firebase `verifyIdToken`，Firebase 簽發（非使用者可選），[A-Za-z0-9] 短字串、不含 `/`，可安全當 doc ID。`${uid}__${date}` 與 `__global__${date}` 不會碰撞（要碰撞需 uid 恰為 `_global_` 之類，Firebase 不會發）。非攻擊者可控、無可利用性，防禦性斷言價值低。**不修。**
+### ❓-1 DNA 失敗無聲降級 → **真（採納，加 warn）**
+- 同意：DNA 降級 = 個人化整層失效，比假日少一行更有感，值得可觀測。
+- 處置：route 加 `if (!dnaResult.ok) console.warn("[trip/generate] DNA 降級：", ...)`。仍不阻擋生成（best-effort 語意不變）。
 
-### 💡-1 移除 `cost` 參數 → **部分採納（用 clamp 取代移除）**
-- 不移除（item B 逐筆計費需要），改用 🐛-1 的 `Math.max(0, cost)` clamp 達同等防護。
-
-### 💡-2 rules 明確 deny `list` → **FALSE POSITIVE（已被 read 涵蓋）**
-- Firestore rules 的 `read` = `get` + `list`。`allow read: if false` **已經**擋掉 `list`。`allow read, write, list` 多餘（`list` 是 `read` 的子操作，非獨立 top-level）。現有 `allow read, write: if false` 已達 reviewer 想要的效果。**不修。**
-
-### ❓-1 外洩 token 仍可打到過期 → **設計符合預期（已釐清）**
-- 對，token 過期前仍可打，但**每日用量護欄把單一 uid 的傷害上限鎖在 `USER_DAILY_BUDGET_USD`／天**，全域熔斷再鎖總量——是「封頂」不只「延緩」。token 撤銷/輪替是另一層（不在本 spec）。符合「防帳單失控」目標。
-
-### ❓-2 `cost` 為何可選 → **已釐清**
-- 為 item B 的「import cost = 單價 × 筆數」預留。配合 🐛-1 clamp，`0` 合法（無付費工作）、負數夾成 `0`，呼叫端皆伺服器端不可由使用者控制，無破口。
+### ❓-2 `summary` prompt injection 風險 → **FALSE POSITIVE（已驗證，無使用者自由文字）**
+- 追 `lib/travel-dna.ts` 的 `buildSummary`：summary = `你的收藏偏好 ${topTags.join("、")}，...`，`topTags` 全來自 `placeTag.options`（**固定 10 類 string literal enum**）。注入段的 `top`（tagCounts[].tag）同樣來自該 enum。**全數系統生成、零使用者自由文字**（使用者可控的 `note`/`group` 根本不進 TravelDna，DNA 只聚合 `tags`）。無 prompt injection 向量。**不需處理。**
 
 ---
 
 ## 三、本輪修正動作
+1. `lib/anthropic.ts`：`Math.max(1, Math.round(...))`（⚠️-1）；`max_tokens` 4096→8192（⚠️-2）。
+2. `app/api/trip/generate/route.ts`：DNA 失敗加 `console.warn`（❓-1）。
+3. 不採納 ⚠️-3/💡-1、💡-2（附理由）；❓-2 經追碼驗證為 FALSE POSITIVE。
 
-1. `lib/rate-limit.ts`：`checkAndConsume` 起點加 `const spend = Math.max(0, cost)`，後續 `decide` 與 `FieldValue.increment` 一律用 `spend`（🐛-1）。
-2. `lib/__tests__/rate-limit.test.ts`：加 `decide` 對 `cost=0`（放行不扣）的回歸測試（🐛-1 佐證）。
-3. 其餘 findings 依上述仲裁：3 條 FALSE POSITIVE、3 條 P2 不修（含 kill-switch 文件化），均附理由。
-
-修正後重跑 `pnpm typecheck && pnpm test && pnpm lint` 全綠 → 才寫 REPORT.md。
+修正後重跑 `pnpm typecheck && pnpm test && pnpm lint` 全綠 → REPORT.md → commit。
 
 ## 統計
-- 🐛 2 條：1 真（已修）、1 P2 不修
-- ⚠️ 3 條：2 FALSE POSITIVE、1 P2 不修
-- 💡 2 條：1 部分採納、1 FALSE POSITIVE
-- ❓ 3 條：全數已釐清（含 1 條同 ⚠️-3）
+- 🐛 0
+- ⚠️ 3：2 真已修（Math.max / max_tokens）、1 不採納（設計取捨）
+- 💡 2：均不採納（附理由）
+- ❓ 2：1 真已修（warn）、1 FALSE POSITIVE（追碼驗證 summary 無使用者文字）
