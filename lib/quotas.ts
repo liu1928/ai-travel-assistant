@@ -8,6 +8,7 @@ export const SERVICE_COST_USD = {
   trip_generate: 0.06, // Sonnet 一次 + 數次 Places/Routes 的粗估上界
   tagging_batch: 0.01, // Haiku 批次/單筆一次
   import_resolve: 0.05, // 每次匯入請求固定（逐筆計費留待項目 B 的 MAX_IMPORT）
+  flight_lookup: 0.02, // AviationStack 一次（免費 100/月；$ 值只為相對護欄，實際限制在月額度）
 } as const;
 export type PaidService = keyof typeof SERVICE_COST_USD;
 

@@ -32,8 +32,15 @@ env:
     availability:
       - BUILD
       - RUNTIME
+  # AviationStack 端點 base（非 secret；免費方案不支援 https，故用 http）
+  - variable: AVIATIONSTACK_BASE_URL
+    value: "http://api.aviationstack.com/v1"
+    availability:
+      - RUNTIME
   # 伺服器端 secret（透過 Cloud Secret Manager）
   - variable: ANTHROPIC_API_KEY
     secret: ANTHROPIC_API_KEY
   - variable: GOOGLE_MAPS_API_KEY
     secret: GOOGLE_MAPS_API_KEY
+  - variable: AVIATIONSTACK_API_KEY
+    secret: AVIATIONSTACK_API_KEY
