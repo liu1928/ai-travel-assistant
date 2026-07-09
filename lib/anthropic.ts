@@ -3,6 +3,7 @@ import Anthropic, { AnthropicError } from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { tripSchema, type Trip, type TripStyle, type Flight, type CarRental } from "@/schema/trip";
 import type { SavedPlace } from "@/schema/place";
+import type { TravelDna } from "./travel-dna"; // type-only：無 runtime 循環依賴
 import { ok, err, type Result } from "./result";
 import { envOr } from "./env";
 
@@ -57,14 +58,14 @@ Atlas AI 分三個階段：
 
 ---
 
-## 🔵 V3：AI 主動旅行系統（未來能力）
-（你要模擬這種能力，即使資料不足）
+## 🔵 V3：個人化引擎（偏好畫像驅動）
 
-你可以：
-- 推測使用者旅行偏好
-- 建議週末旅行
-- 主動優化行程
-- 長期記住風格（概念上）
+若使用者訊息附有「使用者長期旅行偏好畫像」，你要：
+- 依偏好分布選點與排序，讓行程有「這個人的口音」，而非通用行程
+- 每個景點/餐飲的 description 給一句「為你而選」的理由，並盡量引用可驗證的收藏證據（例：「你收藏的咖啡有 8 成是老宅改建，這間也是」），不要空泛恭維
+- 每天刻意保留 1 個「略微跳出既有偏好」的探索點，並在該 stop 的 description 說明為什麼想幫他破框（懂你，也敢挑戰你）
+
+若沒有畫像，就依當下輸入正常規劃，不要腦補使用者偏好。
 
 ---
 
@@ -184,7 +185,11 @@ export type GenerateTripInput = {
   holidays?: HolidayInfo[]; // 行程期間當地假日（含前後緩衝）
   flights?: Flight[]; // 使用者已訂航班（硬約束）
   carRentals?: CarRental[]; // 使用者已訂租車
+  dna?: TravelDna; // 使用者長期偏好畫像（收藏聚合）；缺席或收藏太少則不注入
 };
+
+// 冷啟動門檻：收藏太少時偏好分布是雜訊，不注入畫像避免過擬合。
+export const DNA_MIN_PLACES = 5;
 
 export type GenerateTripError =
   | { kind: "missing_key" }
@@ -194,7 +199,7 @@ export type GenerateTripError =
 
 const WEEKDAY_LABEL = ["日", "一", "二", "三", "四", "五", "六"];
 
-function buildUserMessage(input: GenerateTripInput): string {
+export function buildUserMessage(input: GenerateTripInput): string {
   const parts: string[] = [];
 
   if (input.prompt && input.prompt.trim()) {
@@ -225,6 +230,23 @@ function buildUserMessage(input: GenerateTripInput): string {
   }
   if (constraints.length > 0) {
     parts.push(`限制條件：\n${constraints.join("\n")}`);
+  }
+
+  // 使用者長期偏好畫像（收藏聚合）。冷啟動（收藏 < DNA_MIN_PLACES）不注入，避免對雜訊過擬合。
+  if (input.dna && input.dna.totalPlaces >= DNA_MIN_PLACES && input.dna.tagCounts.length > 0) {
+    const top = input.dna.tagCounts
+      .slice(0, 4)
+      .map((t) => `${t.tag} ${Math.max(1, Math.round(t.ratio * 100))}%`) // 極小 ratio 不印成 0%
+      .join("、");
+    parts.push(
+      `使用者長期旅行偏好畫像（依歷史 ${input.dna.totalPlaces} 個收藏聚合，供個人化排程參考）：\n` +
+        `- 主要偏好：${top}\n` +
+        `- 一句話：${input.dna.summary}\n\n` +
+        `請據此個人化：\n` +
+        `- 盡量從使用者收藏或符合上述偏好的方向選點與排序。\n` +
+        `- 每個景點/餐飲的 description 至少有一句「為你而選」的理由，並盡量引用可驗證的收藏證據（不要空泛恭維）。\n` +
+        `- 每天刻意保留 1 個「略微跳出既有偏好」的探索點，並在該 stop 的 description 說明為什麼想幫他破框。`,
+    );
   }
 
   if (input.holidays && input.holidays.length > 0) {
@@ -333,7 +355,9 @@ export async function generateTrip(
   try {
     const message = await client.messages.parse({
       model: MODEL,
-      max_tokens: 4096,
+      // 8192：分身模式讓每個 stop 多一句「為你而選」理由 + 每天一個探索點，
+      // 提高輸出量；上調上限避免長天數行程 JSON 被截斷變假性 refusal（GLM REVIEW ⚠️-2）。
+      max_tokens: 8192,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: userMessage }],
       output_config: { format: tripOutputFormat },
