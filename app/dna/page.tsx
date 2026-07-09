@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useAuth, signInWithGoogle, authedFetch } from "@/lib/use-auth";
+import { useAuth, authedFetch } from "@/lib/use-auth";
+import { GoogleSignInButton } from "@/components/google-signin";
 
 type TagCount = { tag: string; count: number; ratio: number };
 type TravelDna = { totalPlaces: number; tagCounts: TagCount[]; topTags: string[]; summary: string };
@@ -50,7 +51,7 @@ export default function DnaPage() {
     return (
       <main className="mx-auto flex min-h-screen max-w-md flex-col items-center justify-center px-5">
         <p className="mb-4 text-sm text-neutral-500">請先登入才能查看 Travel DNA。</p>
-        <button onClick={() => void signInWithGoogle()} className="rounded-lg bg-teal-700 px-5 py-2.5 text-sm font-medium text-white hover:bg-teal-800">用 Google 登入</button>
+        <GoogleSignInButton />
       </main>
     );
   }
