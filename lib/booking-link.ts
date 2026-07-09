@@ -24,15 +24,15 @@ export function buildLodgingLink(input: LodgingLinkInput): string {
   const bookingAid = process.env.NEXT_PUBLIC_BOOKING_AID;
   const tpMarker = process.env.NEXT_PUBLIC_TRAVELPAYOUTS_MARKER;
 
-  // Stay22（推薦；聚合多 OTA）。實際 host/參數以 Stay22 官方文件為準，這裡是可運作的預設格式。
+  // Stay22 Allez 深連結（聚合多 OTA、依使用者 IP 導到正確 TLD）。端點 /allez/roam，
+  // 參數 aid + address（+可選 checkin/checkout）。見 https://www.stay22.com/allezdocumentation
   if (stay22) {
     const p = new URLSearchParams();
     p.set("aid", stay22);
     p.set("address", input.query);
     if (input.checkIn) p.set("checkin", input.checkIn);
     if (input.checkOut) p.set("checkout", input.checkOut);
-    p.set("adults", String(input.adults ?? 2));
-    return `https://www.stay22.com/embed/gm?${p.toString()}`;
+    return `https://www.stay22.com/allez/roam?${p.toString()}`;
   }
   // Booking 原生 affiliate id
   if (bookingAid) return bookingSearchUrl(input, bookingAid);

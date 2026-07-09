@@ -29,12 +29,15 @@ describe("buildLodgingLink", () => {
     expect(url).toContain("ss=ANA+Crowne+Plaza+Okinawa"); // 空白 → +
   });
 
-  it("有 NEXT_PUBLIC_STAY22_AID → 走 Stay22（優先）", () => {
+  it("有 NEXT_PUBLIC_STAY22_AID → 走 Stay22 Allez 深連結（優先）", () => {
     vi.stubEnv("NEXT_PUBLIC_STAY22_AID", "myaid");
     vi.stubEnv("NEXT_PUBLIC_BOOKING_AID", "shouldNotWin");
-    const url = buildLodgingLink({ query: "沖繩" });
-    expect(url).toContain("stay22.com");
+    const url = buildLodgingLink({ query: "沖繩", checkIn: "2026-09-25", checkOut: "2026-09-28" });
+    expect(url).toContain("https://www.stay22.com/allez/roam");
     expect(url).toContain("aid=myaid");
+    expect(url).toContain("address=%E6%B2%96%E7%B9%A9");
+    expect(url).toContain("checkin=2026-09-25");
+    expect(url).not.toContain("shouldNotWin");
   });
 
   it("只有 NEXT_PUBLIC_BOOKING_AID → Booking 帶 aid", () => {

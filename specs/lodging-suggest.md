@@ -55,7 +55,7 @@ export function buildLodgingLink(input: LodgingLinkInput): string;
 ```
 
 - 純 Booking 搜尋 URL：`https://www.booking.com/searchresults.html?ss={query}&checkin={in}&checkout={out}&group_adults={n}`（欄位 encode）。
-- Stay22 / Travelpayouts 的實際包裝格式**實作時照各官方文件對一次**；本 spec 只定「優先序 + 有 ID 才包、無則純連結」的行為契約與 env 名稱。
+- Stay22 用 **Allez 深連結**：`https://www.stay22.com/allez/roam?aid=<AID>&address=<query>[&checkin&checkout]`（聚合多 OTA、依 IP 導正確 TLD；見 stay22.com/allezdocumentation）。⚠️ Allez AID（如 `peanutgogo`）≠ LetMeAllez 腳本/地圖 ID（那是 embed widget 用的，本功能不用）。Travelpayouts 格式照其官方文件；本 spec 定「優先序 + 有 ID 才包、無則純連結」的契約與 env 名稱。
 
 ### 2.2 `lib/lodging.ts`（新，伺服器端）
 

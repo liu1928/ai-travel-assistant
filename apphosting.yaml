@@ -26,6 +26,12 @@ env:
     availability:
       - BUILD
       - RUNTIME
+  # 住宿訂房連結變現（Stay22 Allez AID，public 值；訂房連結 /allez/roam 會帶此 AID 賺佣金）
+  - variable: NEXT_PUBLIC_STAY22_AID
+    value: "peanutgogo"
+    availability:
+      - BUILD
+      - RUNTIME
   # 伺服器端 secret（透過 Cloud Secret Manager）
   - variable: ANTHROPIC_API_KEY
     secret: ANTHROPIC_API_KEY
