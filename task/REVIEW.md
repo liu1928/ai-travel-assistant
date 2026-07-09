@@ -1,76 +1,88 @@
-# task/REVIEW.md — 登入錯誤顯示 + popup fallback（GLM-5.2 異質審查）
+# task/REVIEW.md — 住宿建議 + 訂房連結（GLM-5.2 異質審查）
 
-- 時間戳：2026-07-09 21:1x（Asia/Taipei）
-- 審查範圍：`lib/use-auth.ts`（signInWithGoogle 加 redirect fallback + 可讀錯誤、useAuth 加 getRedirectResult）、`components/google-signin.tsx`（新）、7 頁登入鈕替換
-- Reviewer：MCP `glm-reviewer` `review_code`
-- ⚠️ 意見僅為「懷疑」，先原封記錄，再逐條仲裁。
+- 時間戳：2026-07-10 00:0x（Asia/Taipei）
+- 審查範圍：`lib/booking-link.ts`、`lib/lodging.ts`、`app/api/lodging/suggest/route.ts`、`app/trips/[id]/page.tsx`（住宿建議區塊）、`lib/__tests__/booking-link.test.ts`
+- Reviewer：MCP `glm-reviewer` `review_code`，focus=`security`
+- ⚠️ 送審用的是**節略版**程式碼（部分實作以註解代替），數條 finding 是節略造成的誤判；以下對照**實際程式碼**仲裁。
 
 ---
 
 ## 一、GLM 原始回覆（原封不動）
 
-這份程式碼在錯誤處理與元件抽取的方向上是正確的，解決了過去 `void` 吞掉錯誤的問題。但有幾個與 Firebase Auth 生命週期及 Next.js 行為相關的關鍵細節被忽略了。
-
 ### 🐛 問題點
-**1. `signInWithRedirect` 觸發後，`finally { setBusy(false) }` 會導致按鈕狀態閃爍與誤導**
-當 `signInWithPopup` 失敗並進入 fallback 呼叫 `signInWithRedirect` 時，瀏覽器會「離開當前頁面」導頁。但在離開前，`await signInWithRedirect` 的 Promise 會 resolve，導致 `finally` 被執行、`setBusy(false)` 被觸發，讓使用者在頁面卸載前一刻看到按鈕從「登入中...」跳回「用 Google 登入」，產生 UI 閃爍；若 redirect 延遲/失敗，使用者可能點第二次。
-
-**2. `getRedirectResult` 放在 `useAuth`，會導致未登入者噴出 `auth/no-auth-event` 警告**
-未從 redirect 回來的正常造訪者，Firebase 會嘗試解析不存在的 redirect 憑證並 reject（通常 `auth/no-auth-event`），雖被 `.catch()` 吞掉並 `console.warn`，但每個新造訪者都會在 console 留一條警告。
+1. **`buildLodgingLink` 的 stay22 分支沒有 return**：`if (stay22) { /* ... */ }` 只是註解沒實作沒 return。
+2. **`bookingSearchUrl` 的 input 缺型別 → any**：`function bookingSearchUrl(input, aid?)` 嚴格模式報錯。
+3. **`reqBody` 屬性修改違反常數宣告**：`const reqBody` 後 `reqBody.locationBias = ...`，若有 ESLint 不可變規則會被擋。
 
 ### ⚠️ 風險
-1. **`getRedirectResult` 的錯誤未傳遞給 UI**：redirect 回來若因 unauthorized-domain 失敗，只 `console.warn`，畫面什麼都不顯示，違背「顯示可讀錯誤」初衷。
-2. **`useAuth` 5 秒 loading timeout 可能畫面不一致**：真的 >5s 初始化時 loading 被強制 false 但 user 仍 null，短暫顯示未登入再跳已登入，閃爍。
-3. **`signInWithRedirect` 的 Promise 行為依賴瀏覽器**：有時不 resolve 而直接中斷腳本，`await` 後期待往下走不夠穩健。
+1. **開放重導向 / URL 注入**：`query`（place.name / trip.location）放進 URL；雖 URLSearchParams encode、前綴固定 https 大幅降低風險，仍建議前端確認 href 以 https 開頭。
+2. `place.name` 作查詢字串可能過長/特殊字元影響 Booking 結果（功能非安全）。
+3. **tripId 越權依賴 getTrip**：需確認 getTrip 內部強制 uid 過濾。
+4. `checkIn/checkOut` 格式未驗證（目前 route 沒傳，未來擴充要驗）。
+5. `listPlaces` 失敗靜默降級無 log。
+6. **地理重心跨換日線算術平均錯**（台灣國內非問題）。
 
 ### 💡 建議
-1. 修正控制流：觸發 redirect 後直接 return，不讓 `finally` 執行 `setBusy(false)`；更嚴謹可拋 `RedirectInProgressError`。
-2. `getRedirectResult` 只在需要時呼叫，過濾 `auth/no-auth-event`，真實錯誤透過 state 傳 UI。
+1. `PRICE_LEVEL_NUM` 用 `as const`。
+2. `input.center` 解構寫清楚 `latitude/longitude`。
+3. 前端 `rel="noopener noreferrer"`。
 
 ### ❓ 待釐清
-1. 為什麼把 `getRedirectResult` 放 `useAuth` 而非登入入口？
-2. `auth/cancelled-popup-request` 靜默返回是否讓使用者困惑？
+1. stay22 分支是否未實作佔位符？
+2. checkIn/checkOut 從哪來？
+3. name 完全比對是否可靠（空白/全半形差異會漏）？
+4. trip.location 格式？
 
 ---
 
-## 二、仲裁（逐條實際驗證）
+## 二、仲裁（對照實際程式碼）
 
-### 🐛-1 redirect 後 finally 重置 busy → 閃爍/重複點 → **真（已修）**
-- 屬實：`signInWithRedirect` resolve 後 `finally` 會把 busy 關掉，頁面卸載前閃一下。
-- 修法：`signInWithGoogle` 回傳 `"done" | "redirecting"`；元件改成「`outcome === "redirecting"` 時 `return`、不執行後面的 `setBusy(false)`」（移除 `finally`，只在 done/error 才重置）。導頁中保持 busy、按鈕停在「登入中…」。
+### 🐛-1 stay22 沒 return → **FALSE POSITIVE（節略造成）**
+- 實際 `lib/booking-link.ts` 的 stay22 分支**有完整實作 + return** `https://www.stay22.com/embed/gm?...`；`booking-link.test.ts` 的「有 STAY22_AID → 走 Stay22」也**通過**。送審摘要把它縮成註解才看起來沒 return。
 
-### 🐛-2 getRedirectResult 對正常訪客噴警告 → **FALSE POSITIVE**
-- 核實 Firebase 行為：`getRedirectResult(auth)` 對「沒有 pending redirect」的正常造訪**resolve `null`、不 reject**（不會有 `auth/no-auth-event`）。我的 `.catch()` 只在**真的 redirect 失敗**時觸發。故正常訪客**不會**在 console 留警告。前提不成立。
+### 🐛-2 bookingSearchUrl 缺型別 → **FALSE POSITIVE（節略造成）**
+- 實際簽名是 `function bookingSearchUrl(input: LodgingLinkInput, aid?: string): string`；`pnpm typecheck` 全綠、無 implicit any。
 
-### ⚠️-1 getRedirectResult 錯誤未傳 UI → **已知限制（本輪 scoped out，附理由）**
-- 屬實但**已在 PLAN「不在本輪」明列**：本輪只 `console.warn`。理由：(a) popup 路徑（絕大多數使用者）已完整顯示錯誤；(b) redirect 是 fallback，其錯誤要顯示需把 `useAuth` 回傳擴成含 error 再串到 7 頁，屬另一輪；(c) 實務衝擊低——unauthorized-domain 已修好、network 為暫時性。保留 `console.warn`（dev 可見），UI 顯示列後續。
+### 🐛-3 reqBody 屬性修改 → **不修（合法、lint 通過）**
+- `const` 只擋重新賦值、不擋屬性修改；`reqBody` 型別是 `Record<string, unknown>`（非 any）；`pnpm lint` 通過、無相關規則擋。非 bug。
 
-### ⚠️-2 5 秒 loading timeout 閃爍 → **不修（既有程式、非本次引入）**
-- `setTimeout(...5000)` 是**改動前就有**的 IndexedDB 封鎖防呆（原碼有註解），本次沒動它。onAuthStateChanged 正常 <5s 觸發、不閃；>5s 是慢速環境的既有取捨。非本輪 scope。
+### ⚠️-1 開放重導向/注入 → **FALSE POSITIVE（scheme+host 是硬編字面量）**
+- 連結一律 `https://www.booking.com`／`stay22.com`／`tp.media` **固定 host 字面量開頭**，`query` 只進 query string 且經 URLSearchParams encode，**無法注入 `javascript:` 或改 host**；React 也會擋 `javascript:` href。無 open-redirect/XSS。
 
-### ⚠️-3 signInWithRedirect Promise 跨瀏覽器行為 → **本次修法已涵蓋**
-- 若 redirect 不 resolve（腳本中斷）：`await` 掛住、後面不執行，但頁面正在導頁 → 無害。若 resolve：回 `"redirecting"`、元件 return 保持 busy。兩種情況都正確。無需額外處理。
+### ⚠️-3 tripId 越權 → **已驗證安全**
+- `getTrip(uid, id)` 讀 `users/{uid}/trips/{id}`（uid 由 `requireUid` 決定、非前端指定），與其他 trips CRUD 一致的 uid-scoped 路徑。無法讀他人 trip、無 IDOR。
 
-### 💡-1 控制流修正 → **採納**（見 🐛-1；用回傳值取代拋自訂 error，更簡潔）
-### 💡-2 過濾 no-auth-event + 傳 UI → **不採納過濾**（getRedirectResult 正常 resolve null 不 reject，無需過濾）；傳 UI 同 ⚠️-1 列後續
+### ⚠️-5 listPlaces 失敗無 log → **真（已修）**
+- 加 `console.warn("[lodging] 讀收藏失敗，改用 location 字串查", ...)`；降級語意不變（退回 location 字串查），但可觀測。
 
-### ❓-1 getRedirectResult 放 useAuth → **已釐清（合理）**
-- useAuth 是唯一「每頁都掛、最早執行」的 auth hook，在此呼叫一次即消化 pending redirect（成功由 onAuthStateChanged 接手）。正常訪客 resolve null、無副作用。放這裡最省、單一入口。
+### 💡-1 / priceLevel 未知 enum → **採納（型別安全）**
+- 改 `raw.priceLevel && raw.priceLevel in PRICE_LEVEL_NUM ? PRICE_LEVEL_NUM[raw.priceLevel] : undefined`：未知 enum 值 → undefined（不會變成「typed number 但 runtime undefined」）。
 
-### ❓-2 cancelled-popup-request 靜默 → **已釐清（合理）**
-- 元件有 `disabled={busy}` 擋連點，理論上不觸發；真發生（race）代表使用者重複點，靜默是對的（不該把「你點太快」當錯誤丟給使用者）。
+### ⚠️-4 checkIn/checkOut 未驗證 → **非問題（目前不傳；且進 URLSearchParams 也安全）**
+- route 目前不傳日期（optional/後續）；就算傳，也只進 encode 過的 query string，無注入。未來若加日期選擇再驗格式。
+
+### ⚠️-6 換日線質心 → **不修（台灣/亞洲行程非問題，已記為已知限制）**
+- 算術平均在跨 ±180 經度會錯；本 app 使用者行程都在同半球（lng ~120–150），不觸發。列 spec 已知限制，不為極罕見情境過度設計。
+
+### 💡-2 / 💡-3 / ❓-1 center 解構、rel、stay22 → **FALSE POSITIVE（節略造成）**
+- 實際碼 `input.center.lat/lng` 寫清楚、`rel="noopener noreferrer"` 已用、stay22 已實作。
+
+### ❓-3 name 完全比對可靠性 → **不修（與既有 trip/generate 一致、有 fallback，spec 已記）**
+- 用 `placeByName` 完全比對是**沿用既有 `trip/generate` route 的作法**；對不上該點就不計入重心，全對不上則退回 `trip.location` 字串查。saved trip 不存 place_id 故無法用 id 對；屬 spec §7 已載限制。
+
+### ❓-4 trip.location 格式 → **已釐清**：自由文字（行程主要地區，如「沖繩」），作 Places 查詢與整區連結 query 皆合適。
 
 ---
 
 ## 三、本輪修正動作
-1. `lib/use-auth.ts`：`signInWithGoogle` 回傳 `"done" | "redirecting"`（🐛-1）。
-2. `components/google-signin.tsx`：`handleClick` 改成「redirecting → return 保持 busy」、移除 `finally`（🐛-1）。
-3. 其餘：🐛-2 FALSE POSITIVE、⚠️-2 既有非本次、⚠️-1/💡-2 UI 顯示 redirect 錯誤 scoped out（已於 PLAN 列），均附理由。
+1. `lib/lodging.ts`：priceLevel 用 `in` 守未知 enum（💡-1）。
+2. `app/api/lodging/suggest/route.ts`：listPlaces 失敗加 `console.warn`（⚠️-5）。
+3. 其餘：🐛-1/🐛-2/💡-2/💡-3/❓-1 為節略造成的 FALSE POSITIVE（實際碼正確）；⚠️-1 host 硬編無注入；⚠️-3 越權已驗證安全；⚠️-6/❓-3 為 spec 已載限制。
 
-驗證：`pnpm typecheck / test(56) / lint` 全綠。
+驗證：`pnpm typecheck / test(61) / lint` 全綠。
 
 ## 統計
-- 🐛 2：1 真已修（busy 閃爍）、1 FALSE POSITIVE（no-auth-event 前提不成立）
-- ⚠️ 3：1 scoped out（redirect 錯誤 UI）、1 既有非本次（5s timeout）、1 已被修法涵蓋
-- 💡 2：1 採納、1 部分不採納（無需過濾）
-- ❓ 2：均已釐清
+- 🐛 3：2 FALSE POSITIVE（節略）、1 不修（合法、lint 過）
+- ⚠️ 6：1 真已修（listPlaces warn）、1 FALSE POSITIVE（host 硬編）、1 已驗證安全（越權）、3 非問題/已知限制
+- 💡 3：1 採納（priceLevel）、2 FALSE POSITIVE（節略）
+- ❓ 4：均已釐清

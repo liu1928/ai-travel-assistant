@@ -6,6 +6,7 @@ import { useParams, useRouter } from "next/navigation";
 import { useAuth, authedFetch } from "@/lib/use-auth";
 import { GoogleSignInButton } from "@/components/google-signin";
 import type { Flight, CarRental } from "@/schema/trip";
+import { buildLodgingLink } from "@/lib/booking-link";
 import {
   BookingCards,
   BookingsFields,
@@ -41,6 +42,17 @@ type SavedTrip = {
 type ViewState =
   | { status: "loading" }
   | { status: "ready"; trip: SavedTrip }
+  | { status: "error"; message: string };
+
+type LodgingItem = {
+  place: { placeId: string; name: string; address?: string; rating?: number };
+  priceLevel?: number;
+  bookingUrl: string;
+};
+type LodgingState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ready"; items: LodgingItem[] }
   | { status: "error"; message: string };
 
 const STYLE_LABEL: Record<SavedTrip["style"], string> = {
@@ -90,6 +102,26 @@ export default function TripViewPage() {
   const [rentalDrafts, setRentalDrafts] = useState<CarRentalDraft[]>([]);
   const [savingBookings, setSavingBookings] = useState(false);
   const [bookingsError, setBookingsError] = useState<string | null>(null);
+
+  // 住宿建議（Places 錨定行程地理重心 + 價位篩 + 訂房 deep-link）
+  const [maxPriceLevel, setMaxPriceLevel] = useState<number | undefined>(undefined);
+  const [lodging, setLodging] = useState<LodgingState>({ status: "idle" });
+
+  async function findLodging(tripId: string) {
+    setLodging({ status: "loading" });
+    try {
+      const res = await authedFetch("/api/lodging/suggest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tripId, maxPriceLevel }),
+      });
+      const data = (await res.json()) as { items?: LodgingItem[]; error?: string };
+      if (!res.ok) throw new Error(data.error ?? "查詢住宿失敗");
+      setLodging({ status: "ready", items: data.items ?? [] });
+    } catch (e) {
+      setLodging({ status: "error", message: e instanceof Error ? e.message : "查詢住宿失敗" });
+    }
+  }
 
   useEffect(() => {
     if (!user) return;
@@ -310,6 +342,75 @@ export default function TripViewPage() {
                 </div>
               </div>
             )}
+          </div>
+
+          {/* 住宿建議 */}
+          <div className="mb-6 rounded-lg border border-neutral-200 p-4">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-neutral-800">🏨 住宿建議</h3>
+              <a
+                href={buildLodgingLink({ query: view.trip.location })}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="shrink-0 text-xs text-teal-700 hover:text-teal-900"
+              >
+                在 Booking 看這區所有住宿 →
+              </a>
+            </div>
+            <div className="flex items-center gap-2">
+              <select
+                value={maxPriceLevel ?? ""}
+                onChange={(e) => setMaxPriceLevel(e.target.value === "" ? undefined : Number(e.target.value))}
+                className="rounded-lg border border-neutral-300 px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+              >
+                <option value="">不限價位</option>
+                <option value="1">$ 平價</option>
+                <option value="2">$$ 中等</option>
+                <option value="3">$$$ 高級</option>
+              </select>
+              <button
+                onClick={() => void findLodging(view.trip.id)}
+                disabled={lodging.status === "loading"}
+                className="rounded-lg bg-teal-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-teal-800 disabled:opacity-40"
+              >
+                {lodging.status === "loading" ? "搜尋中…" : `找 ${view.trip.location} 的住宿`}
+              </button>
+            </div>
+            {lodging.status === "error" && <p className="mt-2 text-sm text-red-600">{lodging.message}</p>}
+            {lodging.status === "ready" &&
+              (lodging.items.length === 0 ? (
+                <p className="mt-2 text-sm text-neutral-500">查無符合的住宿，換個價位或稍後再試。</p>
+              ) : (
+                <ul className="mt-3 space-y-2">
+                  {lodging.items.map((it) => (
+                    <li
+                      key={it.place.placeId}
+                      className="flex items-start justify-between gap-3 rounded-lg border border-neutral-100 px-3 py-2"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium text-neutral-900">
+                          {it.place.name}
+                          {typeof it.place.rating === "number" && (
+                            <span className="ml-2 text-xs text-amber-500">⭐{it.place.rating}</span>
+                          )}
+                          {typeof it.priceLevel === "number" && (
+                            <span className="ml-1 text-xs text-neutral-400">{"$".repeat(Math.max(1, it.priceLevel))}</span>
+                          )}
+                        </p>
+                        {it.place.address && <p className="truncate text-xs text-neutral-400">{it.place.address}</p>}
+                      </div>
+                      <a
+                        href={it.bookingUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="shrink-0 text-xs font-medium text-teal-700 hover:text-teal-900"
+                      >
+                        訂房 →
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              ))}
           </div>
 
           {saveError && <p className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{saveError}</p>}
