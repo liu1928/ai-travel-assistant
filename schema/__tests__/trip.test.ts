@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { tripSchema, flightSchema, carRentalSchema, tripWithBookingsSchema } from "../trip";
+import { tripSchema, flightSchema, carRentalSchema, lodgingSchema, tripWithBookingsSchema } from "../trip";
 
 const validTrip = {
   title: "台中城市放鬆行",
@@ -110,23 +110,53 @@ describe("carRentalSchema", () => {
   });
 });
 
+const validLodging = {
+  name: "那霸 ○○飯店",
+  address: "沖縄県那覇市...",
+  checkInDate: "2026-09-25",
+  checkInTime: "15:00",
+  checkOutDate: "2026-09-28",
+  checkOutTime: "11:00",
+};
+
+describe("lodgingSchema", () => {
+  it("接受合法住宿（address/日期/時間/note 皆可省略，只需 name）", () => {
+    expect(lodgingSchema.safeParse(validLodging).success).toBe(true);
+    expect(lodgingSchema.safeParse({ name: "民宿A" }).success).toBe(true);
+  });
+
+  it("拒絕空的住宿名稱", () => {
+    expect(lodgingSchema.safeParse({ ...validLodging, name: "" }).success).toBe(false);
+  });
+
+  it("拒絕非法入住時間（12 小時制）", () => {
+    expect(lodgingSchema.safeParse({ ...validLodging, checkInTime: "3:00 PM" }).success).toBe(false);
+  });
+
+  it("拒絕非法退房日期格式", () => {
+    expect(lodgingSchema.safeParse({ ...validLodging, checkOutDate: "2026/09/28" }).success).toBe(false);
+  });
+});
+
 describe("tripWithBookingsSchema", () => {
-  it("舊文件缺 flights/carRentals 欄位 → default 補空陣列（免資料遷移）", () => {
+  it("舊文件缺 flights/carRentals/lodgings 欄位 → default 補空陣列（免資料遷移）", () => {
     const parsed = tripWithBookingsSchema.safeParse(validTrip);
     expect(parsed.success).toBe(true);
     if (parsed.success) {
       expect(parsed.data.flights).toEqual([]);
       expect(parsed.data.carRentals).toEqual([]);
+      expect(parsed.data.lodgings).toEqual([]);
     }
   });
 
-  it("接受含航班與租車的完整行程", () => {
-    const full = { ...validTrip, flights: [validFlight], carRentals: [validRental] };
+  it("接受含航班、租車與住宿的完整行程", () => {
+    const full = { ...validTrip, flights: [validFlight], carRentals: [validRental], lodgings: [validLodging] };
     const parsed = tripWithBookingsSchema.safeParse(full);
     expect(parsed.success).toBe(true);
     if (parsed.success) {
       expect(parsed.data.flights).toHaveLength(1);
       expect(parsed.data.carRentals).toHaveLength(1);
+      expect(parsed.data.lodgings).toHaveLength(1);
     }
   });
 
@@ -135,8 +165,14 @@ describe("tripWithBookingsSchema", () => {
     expect(tripWithBookingsSchema.safeParse(bad).success).toBe(false);
   });
 
-  it("tripSchema（AI 輸出用）沒有 flights 欄位——防止模型編造訂位資料", () => {
+  it("住宿陣列裡有一筆缺 name → 整筆拒絕", () => {
+    const bad = { ...validTrip, lodgings: [validLodging, { ...validLodging, name: "" }] };
+    expect(tripWithBookingsSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("tripSchema（AI 輸出用）沒有 flights/carRentals/lodgings 欄位——防止模型編造訂位資料", () => {
     expect("flights" in tripSchema.shape).toBe(false);
     expect("carRentals" in tripSchema.shape).toBe(false);
+    expect("lodgings" in tripSchema.shape).toBe(false);
   });
 });

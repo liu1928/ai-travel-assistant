@@ -6,13 +6,14 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth, authedFetch } from "@/lib/use-auth";
 import { GoogleSignInButton } from "@/components/google-signin";
 import type { SavedPlace } from "@/schema/place";
-import type { Flight, CarRental } from "@/schema/trip";
+import type { Flight, CarRental, Lodging } from "@/schema/trip";
 import {
   BookingCards,
   BookingsFields,
   draftsToBookings,
   type FlightDraft,
   type CarRentalDraft,
+  type LodgingDraft,
 } from "@/components/bookings";
 
 type TripStyle = "relax" | "food" | "nature" | "city";
@@ -36,6 +37,7 @@ type Trip = {
   budget: { min: number; max: number };
   flights?: Flight[];
   carRentals?: CarRental[];
+  lodgings?: Lodging[];
 };
 
 type GenState =
@@ -96,6 +98,7 @@ function TripGenerateInner() {
   const [travelMode, setTravelMode] = useState<TravelMode>("DRIVE");
   const [flightDrafts, setFlightDrafts] = useState<FlightDraft[]>([]);
   const [rentalDrafts, setRentalDrafts] = useState<CarRentalDraft[]>([]);
+  const [lodgingDrafts, setLodgingDrafts] = useState<LodgingDraft[]>([]);
 
   const [gen, setGen] = useState<GenState>({ status: "idle" });
   const [save, setSave] = useState<SaveState>({ status: "idle" });
@@ -129,7 +132,7 @@ function TripGenerateInner() {
       setGen({ status: "error", message: "請至少輸入一句話，或勾選幾個收藏地點" });
       return;
     }
-    const bookings = draftsToBookings(flightDrafts, rentalDrafts);
+    const bookings = draftsToBookings(flightDrafts, rentalDrafts, lodgingDrafts);
     if (!bookings.ok) {
       setGen({ status: "error", message: bookings.message });
       return;
@@ -151,6 +154,7 @@ function TripGenerateInner() {
           startDate: startDate || undefined,
           flights: bookings.flights.length > 0 ? bookings.flights : undefined,
           carRentals: bookings.carRentals.length > 0 ? bookings.carRentals : undefined,
+          lodgings: bookings.lodgings.length > 0 ? bookings.lodgings : undefined,
         }),
       });
       const data = (await res.json()) as { trip?: Trip; error?: string };
@@ -326,8 +330,10 @@ function TripGenerateInner() {
         <BookingsFields
           flights={flightDrafts}
           rentals={rentalDrafts}
+          lodgings={lodgingDrafts}
           onFlightsChange={setFlightDrafts}
           onRentalsChange={setRentalDrafts}
+          onLodgingsChange={setLodgingDrafts}
         />
       </div>
 
@@ -355,7 +361,7 @@ function TripGenerateInner() {
             </div>
           </div>
 
-          <BookingCards flights={gen.trip.flights} carRentals={gen.trip.carRentals} />
+          <BookingCards flights={gen.trip.flights} carRentals={gen.trip.carRentals} lodgings={gen.trip.lodgings} />
 
           {gen.trip.days.map((day) => (
             <div key={day.day} className="mb-6">

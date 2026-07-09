@@ -5,6 +5,35 @@
 
 ---
 
+## 2026-07-10：住宿欄位（Lodging Field）——第三種訂位資料
+
+**做法**：完全比照既有 flights/carRentals 的「draft 字串表單 → zod schema →
+`tripWithBookingsSchema` → 儲存/顯示/編輯 → 生成 prompt 硬約束」路徑，加第三種
+`lodgings`。`tripSchema`（AI 輸出）**絕不加** lodgings，走「使用者輸入 → route 附掛」，
+沿用防 AI 編造分層。舊 Firestore 文件靠 `.default([])` 零遷移。
+
+**關鍵決策/被否決方案（GLM 審查後仲裁，見該輪 REVIEW.md）**：
+- GLM 兩條 🐛 皆 FALSE POSITIVE：`LodgingDraft` 全欄位是 `string`（draft 恆由
+  `emptyLodging`/`lodgingToDraft` 全填字串），`.trim()` 不會遇 undefined；空 draft
+  仍渲染成卡片，故 `第 i+1 筆` 錯誤訊息與畫面位置一致，不誤導。**下次遇 GLM 說某某
+  「若型別是 string|undefined 會崩」先確認實際型別**，本專案 draft 型別一律全 string。
+- GLM 三條 ⚠️（日期曆法未驗、prompt injection、陣列無 `.max()`）皆「真但不修」：
+  全是**既有全域特性**（flights/carRentals 同樣沒做），非本次新增引入，硬修會破壞對稱
+  且擴大 SPEC。記為 known issue 交 peanut，不在單一 feature 分支偷做全域強化。
+- GLM `checkInTime:"25:99"` 具體例**有誤**——`timePattern /^([01]\d|2[0-3]):[0-5]\d$/`
+  已擋 25:99。GLM 舉的反例要自己驗，別照單全收。
+
+**驗證慣例踩雷**：
+- `git diff > task/diff.patch` 用 **PowerShell `>`** 會產出 **UTF-16**（Read 會顯示成
+  亂碼/寬字元散開）。要餵 GLM/人看的 diff 改用 **Bash 的 `git diff > file`**（UTF-8）。
+- `next build` 會把 `next-env.d.ts` 從 `./.next/dev/types/...` 改成 `./.next/types/...`
+  （dev↔prod route types 路徑），這是**建置噪音**，commit 前 `git checkout -- next-env.d.ts`
+  還原，別混進 feature commit。
+- `pnpm lint` 的 scope 是 `app lib schema`，**不含 `components/`**；改 `components/*.tsx`
+  要靠 `pnpm typecheck` 把關（直接 `npx eslint components/x.tsx` 會回 "File ignored"）。
+
+---
+
 ## 2026-07-03：Gemini CLI 在 headless review 場景下會卡死
 
 **現象**：`gemini -p "<review prompt>" < diff.patch > review.md` 這種 headless 用法，
