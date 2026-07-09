@@ -5,6 +5,33 @@
 
 ---
 
+## 2026-07-10：Flight Lookup（AviationStack 帶航線+時刻）
+
+**做法**：航班 autofill 第二層。按鈕觸發 → `POST /api/flight/lookup` → `lib/aviationstack.ts`
+`lookupFlight`。requireUid + `checkAndConsume("flight_lookup")` 控成本。只帶航線+時刻不帶日期
+（real-time 端點回典型排定、不保證使用者未來日）。
+
+**關鍵技術點（會再遇到）**：
+- **AviationStack `scheduled` 是 UTC**（`...T09:00:00+00:00`），另有 `timezone` 欄（IANA）。
+  **必須用 `Intl.DateTimeFormat` 把 UTC instant 轉機場當地**（09:00 UTC = 17:00 台北），不能切字串。
+  用 **`hourCycle:"h23"`**（非 `hour12:false`）避免午夜輸出 `"24:00"`。**缺 offset 補 `Z` 強制 UTC**
+  （否則 `new Date` 當伺服器本地時間、全錯）。純函式 `hhmmFromScheduled` 抽出來單測。
+- **航班號 regex 要允許數字開頭**：`/^[0-9A-Z]{2}\d{1,4}[A-Z]?$/`。`IATA_AIRLINES` 表有
+  `7C`（濟州）、`5J`（宿霧）、`3K`、`B7`（立榮）等數字開頭代碼。**GLM round-2 建議改 `[A-Z]{2}`
+  ——採納會炸掉這些合法航空（regression）**，已否決。教訓：GLM 對 domain 常識的建議要對照實際資料表驗。
+- **前端 async 回填的 race**：查詢期間使用者若增刪/改列，用 render 期閉包的陣列重建會覆寫並行編輯/寫錯列。
+  解法＝**functional update（`onFlightsChange((prev)=>…)`，讀最新 state）+ 身分守衛
+  （`idx===i && f.flightNo.trim()===capturedNo`）**。前提：呼叫端直傳 `setFlightDrafts`，
+  故把 prop 型別放寬成 `Dispatch<SetStateAction<FlightDraft[]>>` 即可傳 functional updater。
+
+**決策**：`checkAndConsume` 對 AviationStack（硬月額度 100/月）仍走全域 fail-open（peanut 政策），
+未改 fail-close——記 known issue 交 peanut。key 走 query（AviationStack 強制），程式不記/不回傳完整 URL。
+
+**流程踩雷**：Edit 換 `old_string` 時**別把還在用的宣告行（`const body = …`）一起吃掉**——
+route 這次就漏刪 body 宣告、typecheck 才抓到。動多行替換前確認被刪的行沒有下游引用。
+
+---
+
 ## 2026-07-10：住宿欄位（Lodging Field）——第三種訂位資料
 
 **做法**：完全比照既有 flights/carRentals 的「draft 字串表單 → zod schema →
