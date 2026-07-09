@@ -1,7 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireUid } from "@/lib/auth";
 import { importCandidates, type ImportCandidate } from "@/lib/import-core";
-import { checkAndConsume, rateLimitHttp } from "@/lib/rate-limit";
 
 // Chrome Extension 從 chrome-extension:// origin 發請求，需要允許 CORS
 const CORS_HEADERS = {
@@ -23,15 +22,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const gate = await checkAndConsume(auth.value, "import_resolve");
-  if (!gate.ok) {
-    const { status, message, retryAfterSec } = rateLimitHttp(gate.error);
-    return NextResponse.json(
-      { error: message },
-      { status, headers: { ...CORS_HEADERS, "Retry-After": String(retryAfterSec) } },
-    );
-  }
-
+  // 匯入按「筆數」計額度（在 importCandidates 內扣），此處不再收 flat $ 費。
   const body = (await req.json().catch(() => null)) as {
     places?: Array<{ name?: unknown; lat?: unknown; lng?: unknown }>;
   } | null;
