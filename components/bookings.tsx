@@ -4,6 +4,7 @@
 // /trip 生成表單與 /trips/[id] 編輯器共用，見 specs/flights-rentals.md §2.5。
 import { useState } from "react";
 import type { Flight, CarRental } from "@/schema/trip";
+import { nextAirline } from "@/lib/airlines";
 
 // 表單草稿一律用字串，送出時經 draftsToBookings 轉成 schema 型別（空的可選欄位會被省略）
 export type FlightDraft = {
@@ -180,6 +181,14 @@ export function BookingsFields({
   const setFlight = (i: number, key: keyof FlightDraft, value: string) => {
     onFlightsChange(flights.map((f, idx) => (idx === i ? { ...f, [key]: value } : f)));
   };
+  // 打航班號時用 IATA 代碼離線帶出航空公司名（見 nextAirline：不蓋手填、改代碼會更新/清掉 autofill 值）
+  const setFlightNo = (i: number, value: string) => {
+    onFlightsChange(
+      flights.map((f, idx) =>
+        idx === i ? { ...f, flightNo: value, airline: nextAirline(f.flightNo, f.airline, value) } : f,
+      ),
+    );
+  };
   const setRental = (i: number, key: keyof CarRentalDraft, value: string) => {
     onRentalsChange(rentals.map((r, idx) => (idx === i ? { ...r, [key]: value } : r)));
   };
@@ -200,7 +209,7 @@ export function BookingsFields({
               <div key={i} className="rounded-lg border border-neutral-200 p-3">
                 <div className="grid grid-cols-2 gap-2">
                   <Field label="航班號 *">
-                    <input value={d.flightNo} onChange={(e) => setFlight(i, "flightNo", e.target.value)} placeholder="BR198" className={inputCls} />
+                    <input value={d.flightNo} onChange={(e) => setFlightNo(i, e.target.value)} placeholder="BR198" className={inputCls} />
                   </Field>
                   <Field label="航空公司">
                     <input value={d.airline} onChange={(e) => setFlight(i, "airline", e.target.value)} placeholder="長榮" className={inputCls} />
