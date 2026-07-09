@@ -1,0 +1,26 @@
+rules_version = '2';
+
+// Atlas AI — Firestore Security Rules
+// 架構：client 不直連 Firestore，所有讀寫走伺服器端 Admin SDK（見 FIREBASE.md / lib/firebase.ts）。
+// Admin SDK 會繞過本規則，因此規則是「縱深防禦第二道」——擋任何誤用 client SDK 直連的情況。
+// 預設全鎖，只在確有需要時逐集合開放。
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 用量護欄計數（lib/rate-limit.ts 寫入）。只允許 Admin SDK，client 一律不可讀寫。
+    match /usage/{doc} {
+      allow read, write: if false;
+    }
+
+    // 使用者私人資料（收藏 places / 行程 trips / 費用 expenses）。
+    // 目前全走 Admin SDK；client SDK 一律拒絕（未來若開放 client 直讀，改為 request.auth.uid == uid）。
+    match /users/{uid}/{document=**} {
+      allow read, write: if false;
+    }
+
+    // 其餘一律拒絕
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
