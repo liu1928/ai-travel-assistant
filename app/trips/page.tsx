@@ -95,13 +95,21 @@ export default function TripsListPage() {
                   <p className="truncate text-xs text-neutral-500">{t.summary}</p>
                   <p className="mt-1 text-xs text-neutral-400">{t.location} · {new Date(t.createdAt).toLocaleDateString("zh-TW")}</p>
                 </Link>
-                <button
-                  onClick={() => void handleDelete(t.id)}
-                  disabled={busyId === t.id}
-                  className="shrink-0 text-xs text-neutral-400 hover:text-red-600 disabled:opacity-40"
-                >
-                  刪除
-                </button>
+                <div className="flex shrink-0 items-center gap-3">
+                  <Link
+                    href={`/trips/${t.id}/expenses`}
+                    className="text-xs font-medium text-teal-700 hover:text-teal-900 transition-colors"
+                  >
+                    💰 記帳
+                  </Link>
+                  <button
+                    onClick={() => void handleDelete(t.id)}
+                    disabled={busyId === t.id}
+                    className="text-xs text-neutral-400 hover:text-red-600 disabled:opacity-40"
+                  >
+                    刪除
+                  </button>
+                </div>
               </div>
             </li>
           ))}
