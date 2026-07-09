@@ -1,8 +1,9 @@
 // ⚠️ 伺服器端專用：找出標籤是空的收藏地點，批次重新打標籤
 import { listPlaces, updateTags } from "./collection";
-import { tagPlaces } from "./tagging";
-import { mapLimit } from "./concurrency";
+import { tagPlaces, TAG_BATCH_SIZE } from "./tagging";
+import { mapLimit, chunk } from "./concurrency";
 import { ok, err, type Result } from "./result";
+import type { PlaceTag } from "@/schema/place";
 
 export type RetagEmptySummary = {
   checked: number;
@@ -33,8 +34,13 @@ export async function retagEmptyPlaces(
 
   if (empty.length === 0) return ok(summary);
 
-  const tagsResult = await tagPlaces(empty);
-  const tagsList = tagsResult.ok ? tagsResult.value : empty.map(() => []);
+  // 分批標籤（每批獨立成敗），避免一次把大量空標籤地點塞進單一呼叫被截斷。
+  const tagsList: PlaceTag[][] = [];
+  for (const batch of chunk(empty, TAG_BATCH_SIZE)) {
+    const r = await tagPlaces(batch);
+    if (!r.ok) console.warn("[retag] 批次標籤失敗，該批這輪維持空標籤：", r.error.kind);
+    tagsList.push(...(r.ok ? r.value : batch.map(() => [])));
+  }
 
   await mapLimit(empty, 5, async (place, i) => {
     const tags = tagsList[i] ?? [];

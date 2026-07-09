@@ -1,59 +1,67 @@
-# PLAN — Persona Mode（分身模式：Travel DNA 注入生成）
+# PLAN — Foundation Hardening B / C / D
 
-> 任務來源：`specs/persona-mode.md`（升級藍圖第二步，peanut 指定「commit 再分身模式」）。
-> 上一輪 PLAN（Foundation A 用量護欄）已 commit 於 `feat/rate-limit-usage-guard`（37d97f66），git 歷史保留，本檔覆寫為本輪。
-> 分支：`feat/persona-mode`（stacked on rate-limit）。
+> 任務來源：`specs/foundation-hardening.md` 項目 B / C / D（peanut 指定「直接下一步 改b/c/d」）。
+> 上一輪 PLAN（分身模式）已 commit 於 `feat/persona-mode`（b58c6cf1），git 歷史保留，本檔覆寫。
+> 分支：`feat/foundation-bcd`（stacked on persona）。E（記帳頁入口）不在本輪。
 > 依 CLAUDE.md Executor 流程：實作 → 自我驗證 → GLM 審查 → REPORT 後停，等 peanut 驗收。
 
-## 本輪範圍（≤3 檔，直接做但記錄步驟）
+## 三個修正
 
-把 `computeTravelDna(uid)` 的偏好畫像**真正注入行程生成 prompt**（現在從沒進過 → 個人化名不符實），並把 SYSTEM_PROMPT 那段「模擬 V3」的 dead prompt 改寫成真實的「畫像驅動個人化 + 反 DNA 驚喜位」指令。
+| # | 項目 | 類型 | 核心 |
+|---|---|---|---|
+| B | 匯入筆數上限 + 標籤分批 | 成本 | `MAX_IMPORT` 上限、`truncated` 回報、標籤 chunk 30 |
+| C | 車程 `coords` 壓縮 bug | 正確性 | resolve 失敗不壓縮，整天跳過並註明「未估」 |
+| D | 批次標籤靜默空標籤 | 資料品質 | indexed schema 自我對位 + 完整性檢查 → err 不靜默補 `[]` |
 
-## 實作前查證結論
+B 與 D 共用 `tagging.ts` / `import-core.ts`，一起做；C 獨立在 route。
 
-1. `buildUserMessage`（lib/anthropic.ts）目前只 push prompt / places / constraints / holidays / flights / carRentals，**完全沒有整體偏好畫像**。
-2. `computeTravelDna(uid)` 已存在，回 `Result<TravelDna, DnaError>`，`TravelDna = { totalPlaces, tagCounts: {tag,count,ratio}[]（已排序、count>0）, topTags, summary }`。
-3. `import type { TravelDna }` 進 anthropic.ts **無 runtime 循環依賴**（type-only；且 travel-dna 不 import anthropic）。
-4. `buildUserMessage` 目前**未 export** → 為單測需 export（純函式好測）。
-5. route 已有 `auth.value`（uid），加一段 best-effort DNA 查詢即可（比照 holidays 降級哲學）。
+## 設計決策
+
+- **chunk 助手放 `lib/concurrency.ts`**（與既有 `mapLimit` 同層）；`TAG_BATCH_SIZE=30` 由 `tagging.ts` export，import-core / retag 共用（DRY）。
+- **標籤對位邏輯抽純函式 `alignBatchTags(items, count)`**（像 rate-limit 的 `decide()`）——不碰 API、可單測；`tagPlaces` 薄殼包它。
+- **每批獨立成敗**：import-core / retag 逐批呼叫 `tagPlaces`，某批 err → 該批 `[]`（可被 retag-empty 再試），不因一批壞掉全丟。配合 chunk 30 讓單批遠低於 `max_tokens 2048`，正常不觸發截斷。
+- **C 寧可少報不報錯**：當天任一 `place/food` stop 定位失敗 → 跳過該天車程估計 + insight「有地點無法定位，未估移動時間」，不用壓縮後的相鄰點算出偏低數字。
+- **上限預設 300**（`MAX_IMPORT_PER_REQUEST` 可覆寫）；`truncated>0` 前端提示。
 
 ## 步驟
 
-### P-1 `lib/anthropic.ts`
-- `import type { TravelDna } from "./travel-dna";`
-- `GenerateTripInput` 加 `dna?: TravelDna;`
-- 新增 `export const DNA_MIN_PLACES = 5;`（冷啟動門檻）
-- `export function buildUserMessage`（改為 export 供測試）
-- 在 constraints push 之後、holidays 之前插入「使用者長期旅行偏好畫像」段：
-  條件 `input.dna && input.dna.totalPlaces >= DNA_MIN_PLACES && input.dna.tagCounts.length > 0`
-  內容：top 4 tag + ratio%、summary、三條個人化指令（為你而選 evidence-linked / 每天 1 個反 DNA 驚喜位）。
-- `SYSTEM_PROMPT` 的 V3 區塊（「## 🔵 V3：AI 主動旅行系統（未來能力）」那段「模擬」指示）改寫成「畫像驅動個人化」真實指令，含「為你而選」與「反 DNA 驚喜位」。V1/V2、輸出格式、禁止行為**不動**。
+### D-1 `lib/concurrency.ts`
+- 新增 `export function chunk<T>(arr, size): T[][]`。
 
-### P-2 `app/api/trip/generate/route.ts`
-- `import { computeTravelDna } from "@/lib/travel-dna";`
-- 生成前 best-effort：`const dnaResult = await computeTravelDna(auth.value); const dna = dnaResult.ok ? dnaResult.value : undefined;`（失敗不阻擋，比照 holidays/Routes）
-- `generateTrip({ ..., dna })`
+### D-2 `lib/tagging.ts`
+- `export const TAG_BATCH_SIZE = 30;`
+- `batchSchema` 改 `{ items: { index:int, tags: placeTag[].max(4) }[] }`；system prompt 要求「對每個地點回傳 {index, tags}，index 從 1 起，務必涵蓋每一個編號」。
+- 抽純函式 `export function alignBatchTags(items, count): Result<PlaceTag[][], TaggingError>`：依 index 組回，缺任一 index → `err(api_error 疑似截斷)`。
+- `tagPlaces` parse 後呼叫 `alignBatchTags`（`tagPlace` 單筆不動）。
 
-### P-3 `lib/__tests__/anthropic.test.ts`（新）
-- 測 `buildUserMessage`：
-  - dna 且 `totalPlaces>=5` 且有 tagCounts → 輸出含「偏好畫像」段與 top tag %。
-  - `totalPlaces<5` → 不含畫像段（冷啟動不注入）。
-  - 無 dna → 不含（回歸不破）。
+### B-1 `lib/import-core.ts`
+- `import { chunk, mapLimit } from "./concurrency"`、`import { tagPlaces, TAG_BATCH_SIZE } from "./tagging"`、`import { envOr } from "./env"`、加 `type PlaceTag`。
+- `const MAX_IMPORT = ...(envOr("MAX_IMPORT_PER_REQUEST","300"), NaN 防呆)`。
+- `ImportSummary` 加 `truncated: number`（初始化 0）。
+- `valid` 超過 `MAX_IMPORT` → 只取前 N，`summary.truncated = validAll.length - N`。
+- 標籤改 `for (const batch of chunk(toSave, TAG_BATCH_SIZE)) { const r = await tagPlaces(batch); tagsList.push(...(r.ok ? r.value : batch.map(()=>[]))); }`。
 
-## 設計決策（與 spec 一致）
-- DNA 是**輸入訊號、不進 tripSchema**（防模型「生成」偏好數字，沿用航班/租車分層）。
-- best-effort 降級不阻擋生成。
-- 冷啟動 `<5` 不注入（偏好是雜訊）。
-- 「反 DNA 驚喜位」防個人化僵化；「為你而選」要求可驗證證據防公式化空話。
+### B-2 `lib/retag.ts`
+- 同樣 chunk `empty`：逐批 `tagPlaces`，每批獨立成敗，concat 成 `tagsList`。
+
+### B-3 `app/import/page.tsx`
+- 前端 `ImportSummary` type 加 `truncated`；takeout 完成訊息 `truncated>0` 時多一行「超過單次上限，已匯入前 N 筆，其餘請分批」。
+
+### C-1 `app/api/trip/generate/route.ts`
+- Routes best-effort 迴圈：改為逐 stop 產 coord；**任一 stop 定位失敗即整天跳過估計**並 push insight「第 N 天有地點無法定位，未估移動時間」；只有全數定位且 `coords.length>=2` 才 `estimateLegs`。
+
+### 測試
+- `lib/__tests__/concurrency.test.ts`（新）：`chunk` 邊界（空、剛好整除、有餘、size>len）。
+- `lib/__tests__/tagging.test.ts`（新）：`alignBatchTags` 完整→ok 對齊、缺尾→err、亂序 index→正確對齊、count=0→ok []。
 
 ## 驗收
 ```bash
 pnpm typecheck && pnpm test && pnpm lint   # 全綠
 ```
-實測：收藏 ≥5 且偏好明顯 → 生成的 description 出現引用收藏 pattern 的理由 + 每天一個破框探索點；收藏 <5 → 行為同現在；computeTravelDna 故意失敗 → 生成仍成功。
-完成後：git diff → GLM review_code → REVIEW.md 仲裁 → REPORT.md → commit → 停等 peanut 驗收。
+實測：① 匯入 >300 筆 Takeout → `truncated>0`、前端提示、已匯入 =300；② 造一個含冷僻無法定位 stop 的行程 → 該天 insight「未估移動時間」、不再出現偏低分鐘數；③ 模擬 tagPlaces 輸出缺尾 index → 回 api_error、不靜默補 []；正常小批次照常標到。
+完成後：git diff → GLM review_code → REVIEW.md 仲裁 → REPORT.md → commit → 停等 peanut。
 
 ## 不在本輪
-- V3 autoPick（模糊 prompt 時自動依 DNA 選 top-k）
-- Travel DNA v2（embedding / 地理聚類 / 時間窗）
-- prompt caching（固定 system 前綴；DNA 段動態不可快取）
+- E 記帳頁入口
+- 逐筆計費（把 A 的 `import_resolve` 固定改成 × 筆數）——B 已備好筆數，之後接
+- retag 退避窗（需 schema 加 lastRetagAt；本輪只做 chunk 安全化，不加退避）
