@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import type { SavedPlace, PlaceSearchResult, PlaceTag } from "@/schema/place";
-import { useAuth, signInWithGoogle, signOutUser, authedFetch } from "@/lib/use-auth";
+import { useAuth, signOutUser, authedFetch } from "@/lib/use-auth";
+import { GoogleSignInButton } from "@/components/google-signin";
 
 const TAG_STYLE: Record<string, string> = {
   海景: "bg-sky-50 text-sky-700 ring-sky-200",
@@ -32,12 +33,7 @@ function SignIn() {
     <main className="mx-auto flex min-h-screen max-w-md flex-col items-center justify-center px-5">
       <h1 className="text-2xl font-semibold tracking-tight text-neutral-900">Atlas</h1>
       <p className="mt-1 mb-8 text-sm text-neutral-500">把地點收進來，之後變成旅行。</p>
-      <button
-        onClick={() => void signInWithGoogle()}
-        className="rounded-lg bg-teal-700 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-teal-800"
-      >
-        用 Google 登入
-      </button>
+      <GoogleSignInButton />
     </main>
   );
 }

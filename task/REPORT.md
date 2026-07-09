@@ -1,60 +1,45 @@
-<!-- 產生日期: 2026-07-09 | 產生模型: claude-opus-4-8 | 引用 REVIEW.md 時間戳: 2026-07-09 19:1x（Asia/Taipei）| 下次審視: 調 fit 公式 / 加 AI 理由 / embedding 契合 前 -->
+<!-- 產生日期: 2026-07-09 | 產生模型: claude-opus-4-8 | 引用 REVIEW.md 時間戳: 2026-07-09 21:1x（Asia/Taipei）| 下次審視: 要顯示 redirect 錯誤 UI 或動 auth 前 -->
 
-# REPORT — 反向策展（貼靈感，AI 用你的 DNA 過濾）※ 旗艦
+# REPORT — 登入錯誤顯示 + popup 失敗 fallback 到 redirect
 
-> 任務來源：`specs/reverse-curation.md`（升級藍圖旗艦）。計畫見 `task/PLAN.md`。分支 `feat/reverse-curation`（stacked on import-count-cap）。
-> 依 CLAUDE.md Executor 流程完成：實作 → 自我驗證 → **GLM 異質審查 + 4 視角對抗驗證 workflow** → 仲裁 → 本報告。
+> 任務來源：peanut 指示（正式站「Google 登入沒反應」根因＝`void signInWithGoogle()` 吞掉錯誤）。計畫見 `task/PLAN.md`。分支 `feat/auth-error-surface`（off main）。
+> 依 CLAUDE.md Executor 流程完成：實作 → 自我驗證 → GLM 審查（`task/REVIEW.md`）→ 仲裁 → 本報告。
 > **未宣告 Done——等 peanut 驗收。**
 
-## 1. 功能
-貼一段別人的遊記/IG/清單 → Claude(Haiku) 抽出地點 → 用你的 Travel DNA 給契合度評分（⭐ + 一句理由）→ 預覽勾選 → 確認才收藏。**預覽階段不寫 DB**（人工守門）；命中你零收藏的 tag 標「補盲區」（策展缺口引擎）。
-
-## 2. 改了哪些檔案（8 檔）
+## 1. 改了哪些檔案（9 檔）
 
 | 檔案 | 改動 |
 |---|---|
-| `lib/inspiration.ts`（新） | 抽地點 `extractAndScore` + 純函式 `scoreFit`（契合度/星等/補盲區/確定性理由）+ `lowConfidence` 名稱比對；DNA fail-fast、`resolveFailed` 回報 |
-| `app/api/import/inspiration/route.ts`（新） | 預覽：auth + AI 抽取 $ 費 + 文字長度上限 + error 對映（含 dna_error） |
-| `app/api/import/inspiration/confirm/route.ts`（新） | 確認寫入：zod 驗證 + 去重 + 冪等 `addPlace`，不重打 Places/不扣額度 |
-| `lib/import-core.ts` | 匯出 `resolveCandidate`（inspiration 複用同套名稱→place_id 解析） |
-| `lib/rate-limit.ts` | `checkAndConsumeImports` 加**全域匯入筆數熔斷**（GLM/verify HIGH 修正） |
-| `lib/quotas.ts` | `GLOBAL_DAILY_IMPORT_LIMIT`（4000，env 覆寫） |
-| `app/import/page.tsx` | 「✨ 貼靈感」section：textarea → 評分清單（⭐/理由/補盲區/請確認徽章）→ 勾選 → 批次收藏 |
-| `lib/__tests__/inspiration.test.ts`（新） | `scoreFit` 6 case |
+| `lib/use-auth.ts` | `signInWithGoogle` 加 **popup→redirect fallback**（popup 被封鎖/環境不支援時自動改整頁 redirect）+ **丟可讀中文錯誤**（`authErrorMessage`），回傳 `"done"\|"redirecting"`；`useAuth` 加 `getRedirectResult` 消化 redirect 回來結果（失敗 console.warn 不吞） |
+| `components/google-signin.tsx`（新） | 共用 `<GoogleSignInButton>`：catch 顯示錯誤 + busy 狀態；`"redirecting"` 時保持 busy 不重置 |
+| 7 頁（`app/page` `import` `trip` `trips` `trips/[id]` `trips/[id]/expenses` `dna`） | `<button onClick={() => void signInWithGoogle()}>` → `<GoogleSignInButton />`，移除各頁 `signInWithGoogle` import |
 
-**設計要點**：預覽不寫 DB（守門）；confirm 不重打 Places（省最貴 SKU）；理由用確定性模板不打 AI；只吃純文字不爬網；名稱解析非精確 place_id → lowConfidence 徽章緩解。復用三個現成資產：`computeTravelDna`、`tagPlaces`、`resolveCandidate`。
+**修的事**：先前 7 頁登入鈕都 `void signInWithGoogle()` 把錯誤吞掉（這次 `auth/unauthorized-domain` 就是這樣變成「沒反應」查不到原因）。現在：
+- **錯誤看得到**：登入失敗顯示可讀中文（含網域未授權/網路失敗/未啟用）。
+- **更耐 popup/COOP**：popup 被封鎖 → 自動 fallback 整頁 redirect。
+- **DRY**：7 處重複的吞錯 pattern 收斂成一個共用元件。
 
-## 3. 測試結果
+## 2. 測試結果
 ```
 pnpm typecheck  → ✓
-pnpm test       → ✓ 7 files / 56 passed（新增 scoreFit 6 + 匯入雙軸 decide）
-pnpm lint       → ✓
+pnpm test       → ✓ 56 passed（本次無新增測試——純 UI/auth 流程，邏輯已在型別與人工實測層）
+pnpm lint       → ✓（註：lint script 只掃 app/lib/schema；components 未納入既有 lint 範圍，但 typecheck 有涵蓋）
 ```
 
-## 4. 雙重審查與修正（詳見 `task/REVIEW.md`）
+## 3. GLM finding 統計（詳見 `task/REVIEW.md`）
+- 🐛 2：**1 真已修**（redirect 觸發後 `finally setBusy(false)` 會讓按鈕在導頁前閃回、可能被重複點 → 改回傳 `"redirecting"`、元件保持 busy 不重置）、**1 FALSE POSITIVE**（「getRedirectResult 對正常訪客噴 no-auth-event」——核實 Firebase：無 pending redirect 時 resolve `null` 不 reject，故無 console 噪音）
+- ⚠️ 3：1 scoped out（redirect 回來的錯誤只 console.warn、未上 UI——PLAN 已列後續，popup 路徑已完整顯示錯誤）、1 既有非本次（5s loading timeout）、1 已被修法涵蓋（跨瀏覽器 redirect Promise 行為）
+- ❓ 2：均已釐清
 
-跑了**兩個獨立審查**：GLM-5.2（異質模型）+ 4 視角對抗驗證 workflow（security/cost-abuse/correctness/ux-integrity，各讀真實碼，共 14 findings）。
+## 4. Known issues / 待實測（部署後）
+- **正常 popup 登入**：照舊。
+- **popup 被封鎖**（瀏覽器設定擋 popup）→ 應自動 redirect 登入。
+- **未授權網域 / 其他錯誤**→ 按鈕下方顯示紅字可讀訊息（不再沒反應）。
+- **已知限制**：redirect fallback 回來後若失敗（如仍未授權網域）目前只 `console.warn`、UI 不顯示——要顯示需把 `useAuth` 回傳擴成含 error 再串到各頁，列為後續。實務衝擊低（unauthorized-domain 已修、網路錯為暫時性）。
+- `components/` 不在 `pnpm lint` 範圍（既有 script 限制，同 `components/bookings.tsx`）；typecheck 已涵蓋。
 
-**採納並修正 7 項**：
-1. **[HIGH 成本]** Places 解析成本不進 $ 全域熔斷 → 新增**全域匯入筆數熔斷**（不折回 $ 維度以免擋正當大匯入；改用全域筆數軸，與 per-uid 對稱）。
-2. **[MED 正確性]** DNA 讀取失敗靜默降級成全 1 星/補盲區 → DNA **移到最前 fail-fast**（`dna_error`），空收藏仍合法。
-3. **[MED UX]** 截斷/定位失敗筆數靜默消失 → 回傳 `resolveFailed`、提示移出 else、文案誠實交代去向。
-4. **[MED UX]** confirm 出錯丟掉昂貴預覽 → 失敗**保留預覽+勾選**可直接重試。
-5. **[low]** gapTags 依 ratio 排序 → 補盲區理由指向最空白方向。
-6. **[low]** 補盲區恆低星、預設不勾 → 預設勾選加 `isGapFiller`，賣點被看到。
-7. **[low]** done 加「回收藏頁查看 →」CTA。
-
-**不修（附實證）**：confirm 信任前端（spec §7 刻意、**無 uid/owner 欄位→無 IDOR**、只影響自己收藏）、prompt injection（structured output + 固定 sink + reason 不打 AI → 無實質危害，FALSE POSITIVE 級）、mapLimit 索引錯位（`results[i]=await fn(items[i])` 保證對齊，FALSE POSITIVE）、被限流仍扣 $（對應真跑過的抽取、Places 排在 gate 後）、confirm 全量 listPlaces（冪等、讀便宜）、預覽 $ 低估 2 次 Haiku（個位數 token）、normalizeName 全形（lowConfidence 只是柔性提醒）。
-
-## 5. Known issues / 待實測
-
-- 實測：貼含 5–8 地點的遊記 → 預覽評分與 DNA 一致、不寫 DB；勾選收藏 → 收藏頁出現；已收藏 skipped；命中零收藏 tag → 補盲區徽章 + 預設勾選；超長 → 略過提示；定位失敗 → 交代筆數；confirm 送非法 tag → 400；confirm 網路錯 → 預覽保留可重試。
-- **契合度公式是啟發式**（`0.7*max+0.3*breadth ×2.2`），需真實資料校準；理由用確定性模板（AI 自然理由、embedding 語意契合屬後續）。
-- **名稱解析非精確 place_id**（既有限制）→ lowConfidence 徽章緩解，非根治。
-- **全域匯入熔斷 4000/日** 是暫定，可用 `QUOTA_GLOBAL_DAILY_IMPORTS` env 調。
-
-## 6. 升級藍圖至此全數補完
-Foundation A/B/C/D/E · 分身模式 · 逐筆計費（匯入筆數雙軸）· **反向策展**。三份 spec 全部落地。
+## 5. 部署
+本 PR 合併進 main 後，App Hosting 會自動 build/deploy（同前）。合併前正式站的登入已可用（authorized domain 已加）；本 PR 是讓**未來任何 auth 問題都看得到 + 更耐 popup 封鎖**。
 
 ---
 **狀態：實作完成、驗收未過。等 peanut 確認後才可宣告 Done。**

@@ -3,7 +3,8 @@
 import { useState, useRef } from "react";
 import Link from "next/link";
 import type { PlaceSearchResult } from "@/schema/place";
-import { useAuth, signInWithGoogle, authedFetch, auth } from "@/lib/use-auth";
+import { useAuth, authedFetch, auth } from "@/lib/use-auth";
+import { GoogleSignInButton } from "@/components/google-signin";
 
 type ImportSummary = { success: number; skipped: number; failed: number; invalid: number; truncated: number; rateLimited: boolean };
 type ShareResult = { kind: "place"; places: PlaceSearchResult[] };
@@ -175,7 +176,7 @@ export default function ImportPage() {
     return (
       <main className="mx-auto flex min-h-screen max-w-md flex-col items-center justify-center px-5">
         <p className="mb-4 text-sm text-neutral-500">請先登入才能匯入。</p>
-        <button onClick={() => void signInWithGoogle()} className="rounded-lg bg-teal-700 px-5 py-2.5 text-sm font-medium text-white hover:bg-teal-800">用 Google 登入</button>
+        <GoogleSignInButton />
       </main>
     );
   }

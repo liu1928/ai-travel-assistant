@@ -3,7 +3,8 @@
 import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useAuth, signInWithGoogle, authedFetch } from "@/lib/use-auth";
+import { useAuth, authedFetch } from "@/lib/use-auth";
+import { GoogleSignInButton } from "@/components/google-signin";
 import type { Expense, ExpenseCategory, Currency } from "@/schema/expense";
 
 // ───────── constants ─────────
@@ -195,9 +196,7 @@ export default function ExpensesPage() {
     return (
       <main className="mx-auto flex min-h-screen max-w-md flex-col items-center justify-center px-5">
         <p className="mb-4 text-sm text-neutral-500">請先登入才能查看費用。</p>
-        <button onClick={() => void signInWithGoogle()} className="rounded-lg bg-teal-700 px-5 py-2.5 text-sm font-medium text-white hover:bg-teal-800">
-          用 Google 登入
-        </button>
+        <GoogleSignInButton />
       </main>
     );
   }
