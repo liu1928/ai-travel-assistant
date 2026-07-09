@@ -1,45 +1,42 @@
-<!-- 產生日期: 2026-07-09 | 產生模型: claude-opus-4-8 | 引用 REVIEW.md 時間戳: 2026-07-09 21:1x（Asia/Taipei）| 下次審視: 要顯示 redirect 錯誤 UI 或動 auth 前 -->
+<!-- 產生日期: 2026-07-09 | 產生模型: claude-opus-4-8 | 引用 REVIEW.md 時間戳: 2026-07-09 23:5x（Asia/Taipei）| 下次審視: 補航班 API 帶航線時刻（第二層）前 -->
 
-# REPORT — 登入錯誤顯示 + popup 失敗 fallback 到 redirect
+# REPORT — 航班號自動帶航空公司（①A）
 
-> 任務來源：peanut 指示（正式站「Google 登入沒反應」根因＝`void signInWithGoogle()` 吞掉錯誤）。計畫見 `task/PLAN.md`。分支 `feat/auth-error-surface`（off main）。
+> 任務來源：peanut 指示（新增航班那邊輸入航班號自動帶資訊）。SPEC：`specs/flight-airline-autofill.md`。分支 `feat/flight-airline-autofill`（off main）。
 > 依 CLAUDE.md Executor 流程完成：實作 → 自我驗證 → GLM 審查（`task/REVIEW.md`）→ 仲裁 → 本報告。
 > **未宣告 Done——等 peanut 驗收。**
 
-## 1. 改了哪些檔案（9 檔）
+## 1. 改了哪些檔案（3 檔 + spec）
 
 | 檔案 | 改動 |
 |---|---|
-| `lib/use-auth.ts` | `signInWithGoogle` 加 **popup→redirect fallback**（popup 被封鎖/環境不支援時自動改整頁 redirect）+ **丟可讀中文錯誤**（`authErrorMessage`），回傳 `"done"\|"redirecting"`；`useAuth` 加 `getRedirectResult` 消化 redirect 回來結果（失敗 console.warn 不吞） |
-| `components/google-signin.tsx`（新） | 共用 `<GoogleSignInButton>`：catch 顯示錯誤 + busy 狀態；`"redirecting"` 時保持 busy 不重置 |
-| 7 頁（`app/page` `import` `trip` `trips` `trips/[id]` `trips/[id]/expenses` `dna`） | `<button onClick={() => void signInWithGoogle()}>` → `<GoogleSignInButton />`，移除各頁 `signInWithGoogle` import |
+| `lib/airlines.ts`（新） | `IATA_AIRLINES` 代碼表（~40 家、台灣/亞洲為主）+ 純函式 `airlineFromFlightNo`（離線查表）+ `nextAirline`（改/清航班號時的 autofill 語意） |
+| `components/bookings.tsx` | 航班號 `onChange` 改用 `setFlightNo` → 依 `nextAirline` 自動帶/更新航空公司 |
+| `lib/__tests__/airlines.test.ts`（新） | `airlineFromFlightNo` + `nextAirline` 共 11 case |
+| `specs/flight-airline-autofill.md`（新） | 本功能 SPEC |
 
-**修的事**：先前 7 頁登入鈕都 `void signInWithGoogle()` 把錯誤吞掉（這次 `auth/unauthorized-domain` 就是這樣變成「沒反應」查不到原因）。現在：
-- **錯誤看得到**：登入失敗顯示可讀中文（含網域未授權/網路失敗/未啟用）。
-- **更耐 popup/COOP**：popup 被封鎖 → 自動 fallback 整頁 redirect。
-- **DRY**：7 處重複的吞錯 pattern 收斂成一個共用元件。
+**行為**：航班號欄打 `BR198` → 航空公司欄自動帶「長榮航空」。**只在空白或先前 autofill 的欄位作用**——手填的航空公司永不被蓋；改成別家代碼會更新、改成未知代碼會清掉殘留值。**零 API、零 key、零成本、離線**。
 
 ## 2. 測試結果
 ```
 pnpm typecheck  → ✓
-pnpm test       → ✓ 56 passed（本次無新增測試——純 UI/auth 流程，邏輯已在型別與人工實測層）
-pnpm lint       → ✓（註：lint script 只掃 app/lib/schema；components 未納入既有 lint 範圍，但 typecheck 有涵蓋）
+pnpm test       → ✓ 66 passed（新增 airlines 11 case）
+pnpm lint       → ✓
 ```
 
 ## 3. GLM finding 統計（詳見 `task/REVIEW.md`）
-- 🐛 2：**1 真已修**（redirect 觸發後 `finally setBusy(false)` 會讓按鈕在導頁前閃回、可能被重複點 → 改回傳 `"redirecting"`、元件保持 busy 不重置）、**1 FALSE POSITIVE**（「getRedirectResult 對正常訪客噴 no-auth-event」——核實 Firebase：無 pending redirect 時 resolve `null` 不 reject，故無 console 噪音）
-- ⚠️ 3：1 scoped out（redirect 回來的錯誤只 console.warn、未上 UI——PLAN 已列後續，popup 路徑已完整顯示錯誤）、1 既有非本次（5s loading timeout）、1 已被修法涵蓋（跨瀏覽器 redirect Promise 行為）
-- ❓ 2：均已釐清
+- 🐛 0（reviewer 確認邏輯乾淨、無 race）
+- ⚠️ 3：**1 真已修**（autofill 後改航班號 airline 殘留錯值 → 抽 `nextAirline` 純函式，改代碼會更新/清、手填永不動）、1 不修（regex 未驗證「至少一英文字母」——查表已把關、全數字代碼不存在，冗餘）、1 非問題（數字開頭代碼是真代碼）
+- 💡 2：1 隨重構處理、1 不採納
+- ❓ 1：已釐清並修（反向更新/清除）
 
-## 4. Known issues / 待實測（部署後）
-- **正常 popup 登入**：照舊。
-- **popup 被封鎖**（瀏覽器設定擋 popup）→ 應自動 redirect 登入。
-- **未授權網域 / 其他錯誤**→ 按鈕下方顯示紅字可讀訊息（不再沒反應）。
-- **已知限制**：redirect fallback 回來後若失敗（如仍未授權網域）目前只 `console.warn`、UI 不顯示——要顯示需把 `useAuth` 回傳擴成含 error 再串到各頁，列為後續。實務衝擊低（unauthorized-domain 已修、網路錯為暫時性）。
-- `components/` 不在 `pnpm lint` 範圍（既有 script 限制，同 `components/bookings.tsx`）；typecheck 已涵蓋。
+## 4. Known issues / 待實測
+- 實測：打 `BR198`→帶長榮；先手填 airline 再打航班號→不被蓋；打 `ZZ999`→不亂填；autofill 後把代碼改成 `CI`→變中華航空。
+- **只帶航空公司名稱**，不帶航線/起降時刻/日期——那是第二層（需付費航班 API + 日期，`specs/flight-airline-autofill.md §7` 已列，另開 spec）。
+- 代碼表是 curated 子集，罕見航空查不到（回 undefined、使用者手填）。
 
 ## 5. 部署
-本 PR 合併進 main 後，App Hosting 會自動 build/deploy（同前）。合併前正式站的登入已可用（authorized domain 已加）；本 PR 是讓**未來任何 auth 問題都看得到 + 更耐 popup 封鎖**。
+合併進 main → App Hosting 自動 build/deploy。純前端便利功能，不影響既有航班/租車/生成流程。
 
 ---
 **狀態：實作完成、驗收未過。等 peanut 確認後才可宣告 Done。**
