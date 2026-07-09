@@ -2,6 +2,7 @@
 import { tagPlaces, TAG_BATCH_SIZE } from "./tagging";
 import { addPlace, listPlaces } from "./collection";
 import { mapLimit, chunk } from "./concurrency";
+import { checkAndConsumeImports } from "./rate-limit";
 import { envOr } from "./env";
 import type { PlaceSearchResult, PlaceTag } from "@/schema/place";
 
@@ -12,6 +13,7 @@ export type ImportSummary = {
   failed: number;
   invalid: number;
   truncated: number; // 因超過單次上限被丟棄的筆數（>0 時前端要提示）
+  rateLimited: boolean; // 今日匯入筆數已達上限、本次未解析（前端提示）
 };
 
 // 單次匯入上限：防 Takeout 上千筆一次放大 Places/Anthropic 成本。NaN/非正 → 退回 300。
@@ -73,7 +75,14 @@ export async function importCandidates(
   candidates: ImportCandidate[],
 ): Promise<ImportSummary> {
   const apiKey = process.env.GOOGLE_MAPS_API_KEY;
-  const summary: ImportSummary = { success: 0, skipped: 0, failed: 0, invalid: 0, truncated: 0 };
+  const summary: ImportSummary = {
+    success: 0,
+    skipped: 0,
+    failed: 0,
+    invalid: 0,
+    truncated: 0,
+    rateLimited: false,
+  };
   if (!apiKey) {
     summary.failed = candidates.length;
     return summary;
@@ -85,6 +94,13 @@ export async function importCandidates(
   // 上限截斷：只處理前 MAX_IMPORT 筆，其餘計入 truncated（前端提示分批）。
   const valid = validAll.slice(0, MAX_IMPORT);
   summary.truncated = validAll.length - valid.length;
+
+  // 每日匯入筆數上限：在跑付費 Places 解析前先扣額度，超過即整批不解析（前端提示）。
+  const gate = await checkAndConsumeImports(uid, valid.length);
+  if (!gate.ok) {
+    summary.rateLimited = true;
+    return summary;
+  }
 
   const resolved = await mapLimit(valid, 5, (c) => resolve(c, apiKey));
 

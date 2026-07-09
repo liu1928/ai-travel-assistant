@@ -1,30 +1,51 @@
-# PLAN — Foundation Hardening E：記帳頁入口
+# PLAN — 逐筆計費（每日匯入筆數上限）
 
-> 任務來源：`specs/foundation-hardening.md` 項目 E（peanut：「再收尾E」）。
-> 上一輪 PLAN（B/C/D）已 commit 於 `feat/foundation-bcd`（9284d553），git 歷史保留，本檔覆寫。
-> 分支：`feat/foundation-e`（stacked on bcd）。純前端、無後端變動。
+> 任務來源：升級藍圖收尾（peanut：「把剩下的藍圖都補完」）。Foundation A/B 的後續。
+> 上一輪 PLAN（E）已 commit 於 `feat/foundation-e`（0db84e44），git 歷史保留，本檔覆寫。
+> 分支：`feat/import-count-cap`（stacked on E）。
 
-## 問題
-`/trips/[id]/expenses` 記帳功能已上線，但全站**沒有任何 UI 入口**連到它（`grep '/expenses'` 在 trips 頁零命中）——使用者得手動改網址才進得去，等於功能被埋沒。
+## 設計判斷（偏離「naive per-item × $」的原因）
 
-## 步驟（2 檔，純 UI）
+原「後續」構想是把匯入成本改成 `單價 × 筆數` 折進 `$` 護欄。**實作時發現這是錯的**：以真實 Places 單價（~$0.02）計，一次合法的 300 筆 Takeout 匯入 = ~$6，遠超使用者每日 `$2` → **會擋掉正當的一次性大匯入**。
 
-### E-1 `app/trips/[id]/page.tsx`
-- header 列（現有「← 返回行程列表」+ 條件式「去分帳 →」）右側改成 flex 容器，`view.status==="ready"` 時**永遠**顯示 `Link href={/trips/${view.trip.id}/expenses}`「💰 記帳」，「去分帳」維持條件式並列其後。
+正解：**另開一個「每日匯入筆數」維度**（與 `$` 護欄不同軸）——
+- `$` 護欄：管 AI 生成 / 搜尋 / sharelink 預覽等**每請求**付費操作（維持現狀）。
+- 筆數上限：管**批次解析**（takeout / extension / 未來 inspiration）的累積筆數。
+- 預設每日 800 筆：放行一兩次大匯入，擋住「反覆大量匯入」把 Places 呼叫放大。
 
-### E-2 `app/trips/page.tsx`
-- 列表每筆行程的動作區（現有「刪除」按鈕）旁加 `Link href={/trips/${t.id}/expenses}`「💰 記帳」，站內導覽用 `next/link`。
+## 步驟
 
-## 設計
-- 純站內 `next/link`，無後端、無資料模型變動、無新依賴。
-- 沿用既有配色（teal 系）與 emoji 慣例。
+### 1. `lib/quotas.ts`
+- 加 `USER_DAILY_IMPORT_LIMIT = numEnv("QUOTA_USER_DAILY_IMPORTS", 800)`。
+
+### 2. `lib/rate-limit.ts`
+- 加 `checkAndConsumeImports(uid, count)`：同一 `usage/{uid}__{date}` doc 的 `importCount` 欄位原子累加，對照 `USER_DAILY_IMPORT_LIMIT`。**複用純函式 `decide`**（global 維度以 `Infinity` 關閉，只看 user 的 importCount vs limit）。fail-open。`count<=0` 直接放行。
+
+### 3. `lib/import-core.ts`
+- `ImportSummary` 加 `rateLimited: boolean`（初始化 false）。
+- 算完 capped `valid` 後、跑付費 resolve 迴圈**前**：`checkAndConsumeImports(uid, valid.length)`；被擋 → `summary.rateLimited = true` 直接 return（未做任何付費解析）。
+
+### 4. `app/api/import/takeout/route.ts` / `extension/route.ts`
+- **移除** route 層的 flat `checkAndConsume(uid, "import_resolve")`（改由 import-core 按筆數計）；auth 保留。extension 的 CORS 錯誤回應不受影響。
+- `sharelink` route **維持** flat `$` charge（它走預覽、非批次 importCandidates 路徑，1 個連結）。
+
+### 5. `app/import/page.tsx`
+- `ImportSummary` type 加 `rateLimited`；takeout 完成訊息 `rateLimited` 時顯示「今日匯入已達上限，請明天再匯入」。
+
+### 6. 測試
+- `lib/__tests__/rate-limit.test.ts`：加 `decide` 在 `globalBudget=Infinity`（匯入維度複用）下只看 user 額度的 case。
+
+## 設計決策
+- 複用 `decide` 純函式（已測），不重寫比較邏輯。
+- 匯入筆數與 `$` 共用同一 usage doc、不同欄位（`importCount` vs `estCostUsd`），台北日界同步重置。
+- fail-open 一致（Firestore 抖動不擋匯入）。
 
 ## 驗收
 ```bash
-pnpm typecheck && pnpm test && pnpm lint   # 全綠（test 不受影響）
+pnpm typecheck && pnpm test && pnpm lint
 ```
-實測：行程詳情頁與行程列表都看得到「💰 記帳」，點入即 `/trips/[id]/expenses`。
-完成後：git diff → GLM review_code → REVIEW.md 仲裁 → REPORT.md → commit → push → PR → 停等 peanut。
+實測：把 `QUOTA_USER_DAILY_IMPORTS` 設極小 → 匯入超過即 `summary.rateLimited=true`、前端提示；還原後正常大匯入放行；`$` 生成護欄不受影響。
+完成後：git diff → GLM review → REVIEW.md 仲裁 → REPORT.md → commit → push → PR。
 
 ## 不在本輪
-- 逐筆計費、反向策展（見各 spec）。
+- 反向策展（下一支分支）。

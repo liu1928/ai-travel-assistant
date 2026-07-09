@@ -20,3 +20,8 @@ function numEnv(key: string, def: number): number {
 // peanut 定（2026-07-09）：使用者每日 $2、全域每日 $10。env 仍可覆寫。
 export const USER_DAILY_BUDGET_USD = numEnv("QUOTA_USER_DAILY_USD", 2);
 export const GLOBAL_DAILY_BUDGET_USD = numEnv("QUOTA_GLOBAL_DAILY_USD", 10);
+
+// 每日匯入解析上限（筆數，與 $ 護欄不同維度）。批次匯入的成本隨筆數增長，
+// 但一次合法大匯入（數百筆）不該被 $2 預算擋掉；改用筆數上限：放行一兩次大匯入、
+// 擋住「反覆大量匯入」把 Places 呼叫放大。預設 800，env 可覆寫。
+export const USER_DAILY_IMPORT_LIMIT = numEnv("QUOTA_USER_DAILY_IMPORTS", 800);

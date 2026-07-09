@@ -1,64 +1,70 @@
-# task/REVIEW.md — GLM-5.2 異質審查（Foundation E）
+# task/REVIEW.md — GLM-5.2 異質審查（每日匯入筆數上限）
 
-- 時間戳：2026-07-09 18:2x（Asia/Taipei）
-- 審查範圍：記帳頁入口（純前端連結補洞）
-  - `app/trips/[id]/page.tsx`（header 加「💰 記帳」）、`app/trips/page.tsx`（列表每筆加「💰 記帳」）
-- Reviewer：MCP `glm-reviewer` `review_code`，focus=（全面）
+- 時間戳：2026-07-09 18:4x（Asia/Taipei）
+- 審查範圍：逐筆計費（改為「每日匯入筆數」維度）
+  - `lib/quotas.ts`、`lib/rate-limit.ts`（`checkAndConsumeImports`）、`lib/import-core.ts`、`app/api/import/{takeout,extension}/route.ts`、`app/import/page.tsx`、`lib/__tests__/rate-limit.test.ts`
+- Reviewer：MCP `glm-reviewer` `review_code`，focus=`correctness`
 - ⚠️ Reviewer 意見僅為「懷疑」，先原封記錄，再逐條仲裁。
 
 ---
 
 ## 一、GLM 原始回覆（原封不動）
 
+這個設計在方向上正確（將 flat 費改成按筆數維度來避免擋掉正當大匯入），但在交易一致性與計費邊界上存在嚴重瑕疵。
+
 ### 🐛 問題點
-無。根據你的結構說明，`<Link>` 與 `<a>` 皆為兄弟節點，確實沒有產生巢狀 `<a>` 的 HTML 違規問題。
+1. **「扣款成功但解析全失敗」導致額度憑空蒸發**
+   `checkAndConsumeImports` 在 `mapLimit` 解析前就 `tx.set` 扣除 `valid.length` 筆額度。若後續 `resolve(c, apiKey)` 因為 API key 失效、網路全斷而全部失敗，使用者的每日匯入額度已被扣光，卻沒拿到任何有效資料。這在單次 800 筆匯入時會直接把使用者當日額度歸零，極度不合理。
+2. **`decide` 純函式套用語意錯誤，導致上限變 801**
+   `importCount + n > 800`，當 `importCount=0`、`n=800`，`0+800>800` 為 false 放行，扣款後 `importCount=800`。隔天再匯入 1 筆，`800+1>800` 為 true 被擋。這使實際每日上限變成 **801 筆**。
 
 ### ⚠️ 風險
-1. **`id` 為空字串或 `undefined` 的防呆**：程式碼直接使用 `/trips/${view.trip.id}/expenses` 與 `/trips/${t.id}/expenses`。雖然背景說明指出 `SavedTrip` 有 `id` 欄位，但若資料庫或 API 在特定邊界情況下回傳了尚未生成 `id` 的暫存資料，這會導致路由變成 `/trips//expenses` 或 `/trips/undefined/expenses`。建議確認上層元件是否已絕對過濾掉無 `id` 的資料。
-2. **列表頁的刪除按鈕與連結並列的誤觸風險**：在列表頁中，記帳連結與刪除按鈕距離拉近了。若使用者在使用手機版（窄螢幕）時，點擊「💰 記帳」可能會因為手指觸擊範圍過大而誤觸「刪除」按鈕，反之亦然。需確認 RWD 在小螢幕下的 `gap-3` 是否足夠，或刪除按鈕是否有二次確認防護。
+1. **Fail-open 在此處的取捨可能不當**：`importCandidates` 一次可吃數百筆額度，若 Firestore 交易 timeout 觸發 fail-open，攻擊者可繞過每日上限。對高消耗批次操作，fail-closed 較安全。
+2. **`mapLimit` 並發數 5 與 `maxInstances: 2` 的資源競爭**：一次 300 筆匯入並發 5，若兩請求打滿實例，10 個併發外部 API 請求可能被限流拖長、增加交易 timeout 風險。
 
 ### 💡 建議
-1. **路由路徑抽離為常數或輔助函式**：`/trips/${id}/expenses` 這個字串在兩個檔案中硬編碼。既然有 `buildSplitBillHref` 這類輔助函式的慣例，建議也建立類似 `buildExpensesHref(id)` 的工具函式，不僅符合 DRY 原則，也能集中管理路由變更。
-2. **無障礙屬性 (a11y) 補強**：連結文字「💰 記帳」使用了 Emoji，螢幕閱讀器可能會將其朗讀為「金錢符號記帳」或類似語音。建議在連結上加上 `aria-label` 或給 Emoji 加上 `aria-hidden="true"`。
+1. **修正扣款時機以保障一致性**：解析後依實際失敗筆數退補（`increment(-failedCount)`）。
+2. **統一常數命名**：`USER_DAILY_IMPORT_LIMIT` 在 `decide` 中作為 `userBudget` 傳入，建議改名 `USER_DAILY_IMPORT_BUDGET`。
 
 ### ❓ 待釐清問題
-1. 原本條件 `view.status === "ready" && SPLIT_BILL_URL` 改為 `view.status === "ready"`，即使無 `SPLIT_BILL_URL` 也顯示記帳連結？（看起來正確，記帳是站內功能不依賴外部分帳 URL，但想確認 `ready` 是否保證 `view.trip.id` 存在？）
-2. 列表頁刪除按鈕沒有二次確認，這次把連結放得離刪除很近，是否需一併補上刪除的二次確認？
+1. **`sharelink` 維持 flat $ 費，是否與匯入額度雙重計費？** 預覽後點匯入是否 $ 收一次、`importCount` 又扣一次？
 
 ---
 
 ## 二、仲裁（逐條實際驗證）
 
-### 🐛 無 → 確認乾淨
-- reviewer 確認無巢狀 anchor。實際結構：列表項的標題 `<Link>` 與動作 `<div>`（記帳 Link + 刪除 button）為兄弟；詳情頁記帳 Link 與去分帳 `<a>` 為兄弟。無 HTML 違規。
+### 🐛-1 額度蒸發 → **不修（per-attempt 計費對 call-volume cap 正確；MAX_IMPORT 已限單次 ≤300）**
+- 這個 quota 的**目的是限制「每日 Places 呼叫的筆數量」**。`resolve(c)` 對每個 valid candidate 都打**一次付費 Text Search（無論成功與否）**——所以扣 `valid.length` 是**正確反映實際呼叫量**，不是憑空蒸發。
+- reviewer 假設「單次 800 筆歸零」不成立：**`MAX_IMPORT=300` 已把單次上限壓在 300**（`valid = validAll.slice(0, MAX_IMPORT)`），單次最多消耗 300，日額 800 仍剩 500。
+- 若 Places 真的全斷，退款重試只會再打 Places 300 次——volume cap **本就該**擋這種重試風暴。故不退補。前端會顯示「成功 0・失敗 300」，使用者看得到。
 
-### ⚠️-1 `id` 空/undefined 防呆 → **不修（資料模型保證存在）**
-- `SavedTrip.id` = Firestore 文件 id，**存檔時必生成**；記帳 Link 只在 `view.status==="ready"`（已從 Firestore 讀回）與列表（`/api/trips` 回的 SavedTrip[]）渲染，兩者 id 必存在。`/trips//expenses` 對真實資料不會發生。加防呆屬防禦無效資料，本專案 listPlaces/trips 都經 zod safeParse，不會回無 id 的暫存資料。
+### 🐛-2 上限變 801 → **FALSE POSITIVE（累積上限精確為 800）**
+- 逐步驗證：放行條件 `importCount + n <= 800`；只有放行才 `increment(n)`。故任何一系列放行後，累積 importCount 恆 `<= 800`，**永不超過 800**。
+- reviewer 的推演把「importCount 已達 800、下一筆被擋」誤讀成「801 被放行」。實際上第一次匯入 800（累積到 800），之後全擋——**當日總匯入正好 800 = 上限**。無 off-by-one。
 
-### ⚠️-2 記帳連結與刪除誤觸 → **不修（gap-3 足夠；刪除無確認屬既有、非本輪引入）**
-- `gap-3`（12px）觸控間距合理；且記帳是 `Link`（誤點只是導去 expenses、可返回，無破壞），刪除是 `button`。刪除無二次確認是**改動前就存在**的行為，非 E 引入，不在本輪 scope 擴大。
+### ⚠️-1 fail-open 對批次不當 → **不修（與 peanut 既定 fail-open 一致；可利用性極低）**
+- peanut 已拍板全域 fail-open。Firestore timeout 在 `maxInstances:2` 極低併發下幾乎不發生；且 Firestore 若真掛，整個 app（所有資料）already 壞，不是可持續利用的攻擊面。維持一致 fail-open。（已記為 known tradeoff。）
 
-### 💡-1 抽 `buildExpensesHref` → **不採納（trivial 路徑，helper 為過度抽象）**
-- `buildSplitBillHref` 存在是因為它組**帶 query params + encode + base URL** 的複雜 URL；`/trips/${id}/expenses` 只是一段模板字串，抽 helper 增加間接、無實質收益。路由若變更是 2 處 find-replace，成本極低。
+### ⚠️-2 mapLimit 5 × maxInstances 2 資源競爭 → **不修（既有行為、非本次引入）**
+- `mapLimit(valid, 5, resolve)` 是**改動前就存在**的併發設定，本次未動。10 個併發 Places 呼叫在 Places 承受範圍內，非本輪 scope。
 
-### 💡-2 emoji a11y（aria-label / aria-hidden）→ **不採納（與 codebase 慣例一致；app-wide a11y 屬另案）**
-- 連結文字含實義「記帳」，emoji 為裝飾；螢幕閱讀器讀「錢袋 記帳」冗餘但不失義。且全站既有 emoji 連結（`📁 群組`、`🧭 導航`、`← 返回`）皆無 aria，單獨為這兩處加會不一致。**a11y 是升級藍圖 survey 已列的全站缺口**，宜整批處理（含錯誤 `role="alert"`、按鈕 `aria-label`），非在此小補洞夾帶。
+### 💡-1 失敗退補 → **不採納（見 🐛-1，per-attempt 計費對 volume cap 正確）**
 
-### ❓-1 `ready` 是否保證 id → **是（已釐清）**
-- `view.status==="ready"` 代表 trip 已從 Firestore 讀回（含 doc id）。改成不依賴 `SPLIT_BILL_URL` 是刻意的——記帳是站內功能，本就不該被外部分帳 URL 的有無綁住。
+### 💡-2 改名 IMPORT_BUDGET → **不採納（LIMIT 對「筆數上限」比 BUDGET 更清楚）**
+- `BUDGET` 一詞在本檔語境暗示「$ 金額」（USER_DAILY_BUDGET_USD 就是 $）；匯入是**筆數**上限，`LIMIT` 更精確、避免與 $ 預算混淆。`decide` 的參數名 `userBudget` 是泛用比較界線，傳入 count-limit 語意成立。
 
-### ❓-2 刪除二次確認 → **不在本輪（既有行為）**
-- 刪除無確認是改動前現況；本輪只補記帳入口，不擴大改刪除互動。若要做屬另一個 UX 議題。
+### ❓-1 sharelink 雙重計費 → **無雙重計費（已釐清）**
+- `sharelink` **不走 `importCandidates`**：預覽收一次 flat `$`（做 1 個連結的 Places 解析），之後前端把每個地點 POST 到 `/api/collection`（各收一次 `tagging_batch` $，因為每筆要打標籤）。**全程不碰 `importCount`**。$ 費對應的是**不同的實際付費操作**（預覽解析 vs 逐筆標籤），非同一動作重複收費。takeout/extension 才走 importCandidates、只扣 importCount、不收 $ flat。
 
 ---
 
 ## 三、本輪修正動作
-- **無程式碼修正**：GLM 未找到真 bug；所有 finding 經驗證為「資料模型已保證」「既有行為非本輪 scope」或「與 codebase 慣例一致、屬 app-wide a11y 另案」。均附理由。
+- **無程式碼修正**：GLM 兩個 🐛 一個是 FALSE POSITIVE（上限精確 800）、一個是對 volume cap 的誤解（per-attempt 計費正確且 MAX_IMPORT 已限 300）；⚠️/💡 均為既有行為或與既定取捨/命名一致；❓ 已釐清無雙重計費。均附實證理由。
 
-驗證：`pnpm typecheck / test(49 passed) / lint` 全綠。
+驗證：`pnpm typecheck / test(50 passed) / lint` 全綠。
 
 ## 統計
-- 🐛 0
-- ⚠️ 2：均不修（id 資料模型保證、刪除誤觸屬既有 scope）
-- 💡 2：均不採納（trivial 路徑不抽 helper、a11y 屬全站另案）
-- ❓ 2：均已釐清
+- 🐛 2：1 FALSE POSITIVE（上限 800 非 801）、1 不修（per-attempt 計費正確 + MAX_IMPORT 限 300）
+- ⚠️ 2：均不修（fail-open 一致 / mapLimit 既有）
+- 💡 2：均不採納（退補違反 volume cap 語意 / LIMIT 命名更清楚）
+- ❓ 1：已釐清（sharelink 不碰 importCount，無雙重計費）

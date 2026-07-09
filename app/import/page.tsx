@@ -5,7 +5,7 @@ import Link from "next/link";
 import type { PlaceSearchResult } from "@/schema/place";
 import { useAuth, signInWithGoogle, authedFetch, auth } from "@/lib/use-auth";
 
-type ImportSummary = { success: number; skipped: number; failed: number; invalid: number; truncated: number };
+type ImportSummary = { success: number; skipped: number; failed: number; invalid: number; truncated: number; rateLimited: boolean };
 type ShareResult = { kind: "place"; places: PlaceSearchResult[] };
 
 type TakeoutState =
@@ -146,6 +146,11 @@ export default function ImportPage() {
               {takeout.summary.truncated > 0 && (
                 <p className="mt-1 text-amber-600">
                   超過單次上限，已匯入前面的地點，剩餘 {takeout.summary.truncated} 筆請分批再匯入一次。
+                </p>
+              )}
+              {takeout.summary.rateLimited && (
+                <p className="mt-1 text-amber-600">
+                  今日匯入筆數已達上限，本次未匯入。請明天再匯入。
                 </p>
               )}
             </div>

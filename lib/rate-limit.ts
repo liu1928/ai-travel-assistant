@@ -8,6 +8,7 @@ import {
   SERVICE_COST_USD,
   USER_DAILY_BUDGET_USD,
   GLOBAL_DAILY_BUDGET_USD,
+  USER_DAILY_IMPORT_LIMIT,
   type PaidService,
 } from "./quotas";
 
@@ -91,6 +92,37 @@ export async function checkAndConsume(
     });
   } catch (e) {
     console.error("[rate-limit] fail-open", e instanceof Error ? e.message : String(e));
+    return ok(null);
+  }
+}
+
+/**
+ * 匯入以「筆數」計，對照 USER_DAILY_IMPORT_LIMIT（與 $ 預算不同維度，記在同一 usage doc 的
+ * importCount 欄位）。複用純函式 decide：global 維度以 Infinity 關閉，只看 user 的 importCount vs limit。
+ * fail-open 同 checkAndConsume。count<=0 直接放行。
+ */
+export async function checkAndConsumeImports(
+  uid: string,
+  count: number,
+): Promise<Result<null, RateLimitError>> {
+  const n = Math.max(0, Math.floor(count));
+  if (n === 0) return ok(null);
+  const now = Date.now();
+  const date = taipeiDate(now);
+  const userRef = db().collection("usage").doc(`${uid}__${date}`);
+  try {
+    return await db().runTransaction(async (tx) => {
+      const u = await tx.get(userRef);
+      const importCount = (u.data()?.importCount ?? 0) as number;
+      const verdict = decide(importCount, 0, n, USER_DAILY_IMPORT_LIMIT, Number.POSITIVE_INFINITY);
+      if (verdict !== "ok") {
+        return err({ kind: "rate_limited", scope: "user", retryAfterSec: secondsToTaipeiMidnight(now) });
+      }
+      tx.set(userRef, { importCount: FieldValue.increment(n), updatedAt: now }, { merge: true });
+      return ok(null);
+    });
+  } catch (e) {
+    console.error("[rate-limit] imports fail-open", e instanceof Error ? e.message : String(e));
     return ok(null);
   }
 }
