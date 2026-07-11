@@ -97,7 +97,7 @@ Request：`{ trip: Trip }`（完整行程覆蓋，保留原 createdAt，寫入 u
   location: string;           // 主要地區，非空
   style: "relax" | "food" | "nature" | "city";
   summary: string;            // 一句話描述，非空
-  days: [                     // 至少 1 天
+  days: [                     // 至少 1 天；day 編號必須從 1 開始連續（superRefine，2026-07-11 加）
     {
       day: number;            // 正整數
       schedule: [             // 每天至少 1 項
@@ -107,6 +107,7 @@ Request：`{ trip: Trip }`（完整行程覆蓋，保留原 createdAt，寫入 u
           description: string;// 非空
           type: "transport" | "food" | "place" | "rest";
           location?: string;  // 可選，導航連結優先用這個
+          durationMin?: number; // 可選，預計佔用分鐘數（AI 帶出；編輯本地重排用，2026-07-11 加）
         }
       ]
     }
@@ -123,8 +124,14 @@ SavedTrip = Trip + `{ id: string; createdAt: number; updatedAt?: number }`
 ## 4. System Prompt
 
 - 位置：`lib/anthropic.ts` 的 `SYSTEM_PROMPT` 常數
-- 內容：使用者提供的「Atlas AI 個人旅行智慧系統」V1/V2/V3 規格**原文，一字不改**
+- 內容：使用者提供的「Atlas AI 個人旅行智慧系統」V1/V2/V3 規格原文
+  ＋ **2026-07-11 修訂（peanut 核准，解「特殊需求只生成那一天」）**：
+  天數覆蓋硬規則（days 從 day 1 連續、提到「第 N 天」總天數至少 N、指定天數須恰好）、
+  輸出範例改雙日消除單日偏置、schedule 項目加 durationMin。「一字不改」條款自此解除。
 - 輸出約束：只輸出 JSON（實際由 `zodOutputFormat(tripSchema)` structured outputs 強制）
+- 生成後防線（`generateTrip`）：天數完整性檢查（連續性；使用者指定天數→恰好、
+  沒指定→`inferMinDays(prompt)` 推斷的最低天數），不符帶修正指示自動重試 1 次，
+  再不符回 refusal（不把缺天結果回給使用者）。max_tokens 隨預期天數動態上調（8192–24576）。
 
 ## 5. 模型設定
 

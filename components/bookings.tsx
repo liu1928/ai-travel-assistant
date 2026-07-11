@@ -247,30 +247,34 @@ export function BookingsFields({
   const setFlight = (i: number, key: keyof FlightDraft, value: string) => {
     onFlightsChange(flights.map((f, idx) => (idx === i ? { ...f, [key]: value } : f)));
   };
-  // AviationStack 帶航線+時刻（真實 API、按鈕觸發、走用量護欄）。見 specs/flight-lookup.md。
-  // 成功：from/to/departTime/arriveTime 一律帶入；airline 僅當空才帶（不蓋第一層/手填）。
+  // AeroDataBox 帶航線+時刻（真實 API、按鈕觸發、走用量護欄）。見 specs/flight-lookup.md。
+  // 會把該列「日期」一併送出：查的是該出發日的排定班表（解換季改時刻查到舊時間的問題）；
+  // 未填日期則查今日班表並提示。成功：from/to/departTime/arriveTime 一律帶入；
+  // airline 僅當空才帶（不蓋第一層/手填）。
   const lookupFlightRow = async (i: number) => {
     const flightNo = flights[i]?.flightNo.trim() ?? "";
     if (!flightNo) return;
+    const date = flights[i]?.date ?? "";
     setLookup((s) => ({ ...s, [i]: { loading: true } }));
     try {
       const res = await authedFetch("/api/flight/lookup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ flightNo }),
+        body: JSON.stringify({ flightNo, ...(date ? { date } : {}) }),
       });
       const data = (await res.json().catch(() => ({}))) as {
-        airline?: string; from?: string; to?: string; departTime?: string; arriveTime?: string; error?: string;
+        airline?: string; from?: string; to?: string; departTime?: string; arriveTime?: string;
+        dataDate?: string; error?: string;
       };
       if (!res.ok) {
         setLookup((s) => ({ ...s, [i]: { msg: data.error ?? "查詢失敗" } }));
         return;
       }
       // functional update（讀最新 state）+ 身分守衛：查詢期間若使用者增刪/改動列，
-      // 只在「該列仍在 index i 且航班號未變」時回填，避免蓋到別列或覆寫並行編輯。
+      // 只在「該列仍在 index i 且航班號、日期都未變」時回填，避免蓋到別列或覆寫並行編輯。
       onFlightsChange((prev) =>
         prev.map((f, idx) =>
-          idx === i && f.flightNo.trim() === flightNo
+          idx === i && f.flightNo.trim() === flightNo && f.date === date
             ? {
                 ...f,
                 from: data.from ?? f.from,
@@ -282,7 +286,12 @@ export function BookingsFields({
             : f,
         ),
       );
-      setLookup((s) => ({ ...s, [i]: { ok: true, msg: "已帶入" } }));
+      const msg = data.dataDate
+        ? date
+          ? `已帶入（${data.dataDate} 班表）`
+          : `已帶入（未填日期，帶入 ${data.dataDate} 的班表；先填日期再查可拿到當天班表）`
+        : "已帶入";
+      setLookup((s) => ({ ...s, [i]: { ok: true, msg } }));
     } catch (e) {
       setLookup((s) => ({ ...s, [i]: { msg: e instanceof Error ? e.message : "查詢失敗" } }));
     }

@@ -1,0 +1,96 @@
+import { describe, it, expect } from "vitest";
+import { splitLocalDateTime, pickFlight, type AdbFlight } from "@/lib/aerodatabox";
+
+/**
+ * AeroDataBox 回應解析（純函式，不打 API）。
+ * local 已是機場當地時間 → 就地取值；多筆取排定出發最早者。
+ */
+const row = (over: Partial<AdbFlight> = {}): AdbFlight => ({
+  number: "BR 198",
+  airline: { name: "EVA Air", iata: "BR" },
+  departure: {
+    airport: { name: "Taoyuan International", iata: "TPE" },
+    scheduledTime: { utc: "2026-07-25 00:05Z", local: "2026-07-25 08:05+08:00" },
+  },
+  arrival: {
+    airport: { name: "Narita International", iata: "NRT" },
+    scheduledTime: { utc: "2026-07-25 03:20Z", local: "2026-07-25 12:20+09:00" },
+  },
+  ...over,
+});
+
+describe("splitLocalDateTime", () => {
+  it("空白分隔（AeroDataBox 慣用格式）→ 取日期與 HH:mm，不做時區換算", () => {
+    expect(splitLocalDateTime("2026-07-25 08:05+08:00")).toEqual({ date: "2026-07-25", hhmm: "08:05" });
+  });
+
+  it("ISO T 分隔也吃", () => {
+    expect(splitLocalDateTime("2026-07-25T08:05:00+08:00")).toEqual({ date: "2026-07-25", hhmm: "08:05" });
+  });
+
+  it("缺值/亂格式 → undefined", () => {
+    expect(splitLocalDateTime(undefined)).toBeUndefined();
+    expect(splitLocalDateTime("")).toBeUndefined();
+    expect(splitLocalDateTime("08:05")).toBeUndefined();
+  });
+});
+
+describe("pickFlight", () => {
+  it("單筆完整 → 組出結果（含 dataDate = 出發地當地日期）", () => {
+    const r = pickFlight([row()], "BR198");
+    expect(r).toEqual({
+      airline: "長榮航空", // 第一層離線中文名優先於 API 的 "EVA Air"
+      from: "Taoyuan International TPE",
+      to: "Narita International NRT",
+      departTime: "08:05",
+      arriveTime: "12:20",
+      dataDate: "2026-07-25",
+    });
+  });
+
+  it("未知航空代碼 → 退用 API 英文名", () => {
+    const r = pickFlight([row()], "ZZ123");
+    expect(r?.airline).toBe("EVA Air");
+  });
+
+  it("多筆（同號一日多班/多航段）→ 取排定出發最早者", () => {
+    const later = row({
+      departure: {
+        airport: { name: "Songshan", iata: "TSA" },
+        scheduledTime: { local: "2026-07-25 15:30+08:00" },
+      },
+    });
+    const r = pickFlight([later, row()], "BR198");
+    expect(r?.departTime).toBe("08:05");
+    expect(r?.from).toContain("TPE");
+  });
+
+  it("缺起降資訊的列被剔除；全部不可用 → undefined", () => {
+    const broken = row({ arrival: undefined });
+    expect(pickFlight([broken, row()], "BR198")?.arriveTime).toBe("12:20");
+    expect(pickFlight([broken], "BR198")).toBeUndefined();
+    expect(pickFlight([], "BR198")).toBeUndefined();
+  });
+
+  it("local 缺 → 退用 utc 字串取時刻（寧可有值讓使用者校對）", () => {
+    const utcOnly = row({
+      departure: {
+        airport: { name: "Taoyuan International", iata: "TPE" },
+        scheduledTime: { utc: "2026-07-25 00:05Z" },
+      },
+    });
+    const r = pickFlight([utcOnly], "BR198");
+    expect(r?.departTime).toBe("00:05");
+    expect(r?.dataDate).toBe("2026-07-25");
+  });
+
+  it("機場名/代碼缺一用另一個", () => {
+    const noName = row({
+      departure: {
+        airport: { iata: "TPE" },
+        scheduledTime: { local: "2026-07-25 08:05+08:00" },
+      },
+    });
+    expect(pickFlight([noName], "BR198")?.from).toBe("TPE");
+  });
+});

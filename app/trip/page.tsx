@@ -25,6 +25,7 @@ type ScheduleItem = {
   description: string;
   type: "transport" | "food" | "place" | "rest";
   location?: string;
+  durationMin?: number; // AI 生成帶出的預計佔用分鐘數，儲存時原樣傳遞
 };
 type TripDay = { day: number; schedule: ScheduleItem[] };
 type Trip = {

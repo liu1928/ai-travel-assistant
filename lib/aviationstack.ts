@@ -1,3 +1,6 @@
+// ⚠️ 已停用（2026-07-11 換源 AeroDataBox，見 lib/aerodatabox.ts 與 specs/flight-lookup.md）：
+// AviationStack 免費層的 /flights 只回「今天這班」、無法帶日期查未來班表，換季改時刻查到舊時間。
+// 保留備查（比照 scripts/gemini-review.mjs 慣例）；hhmmFromScheduled 的單測仍引用本檔。
 // ⚠️ 伺服器端專用：AviationStack 航班查詢（帶航線 + 起降時刻，真實 API 非 AI）。
 // 見 specs/flight-lookup.md。航班 autofill 第二層（第一層＝離線帶航空公司名 lib/airlines.ts）。
 import { airlineFromFlightNo } from "./airlines";

@@ -1,6 +1,7 @@
-# Spec — Flight Lookup（AviationStack 帶航線+時刻）※ 規劃中，未實作
+# Spec — Flight Lookup（帶航線+時刻）
 
-> 狀態：spec 已定稿待實作。實作時照本文件執行；有歧義回來改本文件，不要口頭發散。
+> 狀態：已上線。**2026-07-11 起資料源換為 AeroDataBox（見 §8），§0–§7 的 AviationStack 內容保留為歷史記錄**。
+> 實作時照本文件執行；有歧義回來改本文件，不要口頭發散。
 > 這是航班 autofill 的**第二層**（第一層＝`specs/flight-airline-autofill.md`，離線帶航空公司名，已上線）。
 > 本層用 **AviationStack** 帶出**航線 + 起降時刻**。真實 API 資料（非 AI），符合 `specs/flights-rentals.md §3` 防 AI 編造原則。
 
@@ -127,3 +128,36 @@ pnpm typecheck && pnpm test && pnpm lint
 - **跨日航班**（紅眼）：arriveTime 只存 HH:mm、不做跨日計算（沿用 flights-rentals §7）。
 - **免費方案 http + 100 次/月**：key 明文、額度有限；付費升 https + 更多額度。
 - 只取 `data[0]`；同號多航段/共掛班號時可能非使用者要的那筆（罕見，使用者可手改）。
+
+---
+
+## 8. 換源 AeroDataBox（2026-07-11，peanut 核准）
+
+**為什麼換**：§7 第一條限制被使用者實際踩到——航空公司換季做長期班表變更後，AviationStack
+即時 `/flights` 端點（不帶日期、只回今天這班）帶出變更前的舊時刻，且資料日期在解析層被丟棄、
+前端無警語，使用者無從發現。免費層要查未來班表只有 `flightsFuture`，但那是機場式查詢
+（iataCode+type+date，不能航班號直查）、有 +7 天盲區，升 Basic $49.99/月也不解此結構問題。
+
+**選型**（四家評比經官方原文複核，詳 task/PLAN.md 2026-07-11 版）：AeroDataBox 勝出——
+`GET /flights/number/{航班號}/{dateLocal}?dateLocalRole=Departure` 原生支援「航班號+日期」直查，
+未來班表免費層可查 365 天（換季班表最慢約 2 週反映）、回應自帶 `{utc, local}` 雙時區時間
+（**local 已是機場當地**，不需 Intl 換算——與 AviationStack scheduled 是 UTC 的舊坑相反）、
+全程 https。RapidAPI BASIC $0/月：600 units（Flight Status 是 Tier 2＝2 units/次 ≈ 300 次/月）、
+hard limit 超額擋請求不扣款（但訂閱需綁信用卡）、限速 1 req/s。無 SLA；台灣 schedules 覆蓋 94%。
+
+**實作差異**（對照 §1–§4）：
+- `lib/aerodatabox.ts` 取代 `lib/aviationstack.ts`（舊檔保留備查）。`lookupFlight(flightNo, dateLocal?)`
+  多收出發日；未填 → 以 UTC 今日近似「今天這班」（維持舊行為）。
+- `FlightLookupResult` 加 `dataDate`（該筆班表的出發地當地日期），前端顯示「已帶入（YYYY-MM-DD 班表）」；
+  未填日期查詢會提示「先填日期再查可拿到當天班表」——把 §7 第一條限制透明化。
+- 回應是 FlightContract **陣列**：缺起降資訊的列剔除，多筆（同號一日多班/多航段）取排定出發最早者。
+- `POST /api/flight/lookup` body 加收 `date?`（YYYY-MM-DD，格式錯 400）；quota `flight_lookup` 沿用。
+- 認證：header `x-rapidapi-key` + `x-rapidapi-host`（由 `AERODATABOX_BASE_URL` 推導，
+  預設 `https://aerodatabox.p.rapidapi.com`）。secret：`AERODATABOX_API_KEY`
+  （Secret Manager + apphosting.yaml，動之前照禁動清單與 peanut 確認）。
+
+**新的已知限制**：
+- 未填日期時的「今日」以台灣時區（Asia/Taipei）計——本專案使用者主要在台灣；在其他時區查非台灣出發的航班仍可能差一天（前端提示填日期即可避開）。
+- 換季班表更新頻率「每 2 週/機場區域」——剛公布的變更最慢 2 週才反映。
+- 免費層資料窗 ±365 天；超窗查詢會查無。
+- 多航段同號航班取第一段，中停後的最終抵達時間需使用者手改（沿用 §7 舊限制）。
