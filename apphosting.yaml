@@ -33,6 +33,7 @@ env:
       - BUILD
       - RUNTIME
   # AviationStack 端點 base（非 secret；免費方案不支援 https，故用 http）
+  # ⚠️ 2026-07-11 換源 AeroDataBox，此變數與下面 AVIATIONSTACK_API_KEY 保留不動（停用備查）
   - variable: AVIATIONSTACK_BASE_URL
     value: "http://api.aviationstack.com/v1"
     availability:
@@ -44,3 +45,5 @@ env:
     secret: GOOGLE_MAPS_API_KEY
   - variable: AVIATIONSTACK_API_KEY
     secret: AVIATIONSTACK_API_KEY
+  - variable: AERODATABOX_API_KEY
+    secret: AERODATABOX_API_KEY
