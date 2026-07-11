@@ -7,6 +7,7 @@ import { useAuth, authedFetch } from "@/lib/use-auth";
 import { GoogleSignInButton } from "@/components/google-signin";
 import type { Flight, CarRental, Lodging } from "@/schema/trip";
 import { buildLodgingLink } from "@/lib/booking-link";
+import { attachDurations, reflowTimes, timeToMin, isRouteInsight } from "@/lib/trip-edit";
 import {
   BookingCards,
   BookingsFields,
@@ -25,8 +26,13 @@ type ScheduleItem = {
   description: string;
   type: "transport" | "food" | "place" | "rest";
   location?: string;
+  durationMin?: number;
 };
 type TripDay = { day: number; schedule: ScheduleItem[] };
+// 編輯草稿：每項掛「有效時長」（進編輯模式時差分算出，跟著項目走），
+// anchorMin = 當天第一項的原始開始時間，刪除/排序後以此錨點重排所有 time。
+type DraftItem = ScheduleItem & { effDurationMin: number };
+type DraftDay = { day: number; anchorMin: number; schedule: DraftItem[] };
 type SavedTrip = {
   id: string;
   title: string;
@@ -95,7 +101,7 @@ export default function TripViewPage() {
   const [view, setView] = useState<ViewState>({ status: "loading" });
 
   const [editing, setEditing] = useState(false);
-  const [draftDays, setDraftDays] = useState<TripDay[]>([]);
+  const [draftDays, setDraftDays] = useState<DraftDay[]>([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -143,7 +149,13 @@ export default function TripViewPage() {
 
   function startEdit() {
     if (view.status !== "ready") return;
-    setDraftDays(view.trip.days.map((d) => ({ day: d.day, schedule: [...d.schedule] })));
+    setDraftDays(
+      view.trip.days.map((d) => ({
+        day: d.day,
+        anchorMin: timeToMin(d.schedule[0]?.time ?? "") ?? 9 * 60,
+        schedule: attachDurations(d.schedule),
+      })),
+    );
     setSaveError(null);
     setEditing(true);
   }
@@ -153,31 +165,53 @@ export default function TripViewPage() {
     setSaveError(null);
   }
 
+  // 刪除/排序後立即以當天錨點重排時間（所見即所得），時長跟著項目走
   function removeItem(dayIdx: number, itemIdx: number) {
-    setDraftDays((prev) => {
-      const next = prev.map((d) => ({ ...d, schedule: [...d.schedule] }));
-      next[dayIdx].schedule.splice(itemIdx, 1);
-      return next;
-    });
+    setDraftDays((prev) =>
+      prev.map((d, di) => {
+        if (di !== dayIdx) return d;
+        const schedule = d.schedule.filter((_, i) => i !== itemIdx);
+        return { ...d, schedule: reflowTimes(schedule, d.anchorMin) };
+      }),
+    );
   }
 
   function moveItem(dayIdx: number, itemIdx: number, direction: -1 | 1) {
-    setDraftDays((prev) => {
-      const next = prev.map((d) => ({ ...d, schedule: [...d.schedule] }));
-      const schedule = next[dayIdx].schedule;
-      const target = itemIdx + direction;
-      if (target < 0 || target >= schedule.length) return prev;
-      [schedule[itemIdx], schedule[target]] = [schedule[target], schedule[itemIdx]];
-      return next;
-    });
+    setDraftDays((prev) =>
+      prev.map((d, di) => {
+        if (di !== dayIdx) return d;
+        const target = itemIdx + direction;
+        if (target < 0 || target >= d.schedule.length) return d;
+        const schedule = [...d.schedule];
+        [schedule[itemIdx], schedule[target]] = [schedule[target], schedule[itemIdx]];
+        return { ...d, schedule: reflowTimes(schedule, d.anchorMin) };
+      }),
+    );
   }
 
   async function saveEdit() {
     if (view.status !== "ready") return;
+    // 刪到空的天在儲存時移除並重新連續編號（schema 要求每天至少 1 項、day 從 1 連續）；
+    // effDurationMin 是編輯期的 UI 欄位，剝掉才符合 tripSchema
+    const cleanedDays = draftDays
+      .filter((d) => d.schedule.length > 0)
+      .map((d, i) => ({
+        day: i + 1,
+        schedule: d.schedule.map(({ effDurationMin: _effDurationMin, ...item }) => item),
+      }));
+    if (cleanedDays.length === 0) {
+      setSaveError("行程至少要保留一個項目");
+      return;
+    }
     setSaving(true);
     setSaveError(null);
     try {
-      const updatedTrip = { ...view.trip, days: draftDays };
+      const updatedTrip = {
+        ...view.trip,
+        days: cleanedDays,
+        // 生成當下的車程 insights 在編輯後已過期，儲存前濾掉（AI 提醒保留）
+        insights: view.trip.insights.filter((s) => !isRouteInsight(s)),
+      };
       const res = await authedFetch(`/api/trips/${view.trip.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -468,7 +502,7 @@ export default function TripViewPage() {
                 ))}
                 {editing && day.schedule.length === 0 && (
                   <li className="rounded-lg border border-dashed border-neutral-300 px-3 py-3 text-center text-xs text-neutral-400">
-                    這天已經沒有行程了
+                    這天已經沒有行程了（儲存時會移除此天並重新編號）
                   </li>
                 )}
               </ul>
@@ -476,13 +510,18 @@ export default function TripViewPage() {
           ))}
 
           {editing ? (
-            <div className="flex gap-2">
-              <button onClick={() => void saveEdit()} disabled={saving} className="rounded-lg bg-teal-700 px-4 py-2 text-sm font-medium text-white hover:bg-teal-800 disabled:opacity-40">
-                {saving ? "儲存中…" : "儲存變更"}
-              </button>
-              <button onClick={cancelEdit} disabled={saving} className="rounded-lg border border-neutral-300 px-4 py-2 text-sm text-neutral-600 hover:bg-neutral-50 disabled:opacity-40">
-                取消
-              </button>
+            <div>
+              <p className="mb-2 text-xs text-neutral-400">
+                刪除或排序後，會以當天第一項的原始時間為錨點自動重排各項時間
+              </p>
+              <div className="flex gap-2">
+                <button onClick={() => void saveEdit()} disabled={saving} className="rounded-lg bg-teal-700 px-4 py-2 text-sm font-medium text-white hover:bg-teal-800 disabled:opacity-40">
+                  {saving ? "儲存中…" : "儲存變更"}
+                </button>
+                <button onClick={cancelEdit} disabled={saving} className="rounded-lg border border-neutral-300 px-4 py-2 text-sm text-neutral-600 hover:bg-neutral-50 disabled:opacity-40">
+                  取消
+                </button>
+              </div>
             </div>
           ) : (
             view.trip.insights.length > 0 && (

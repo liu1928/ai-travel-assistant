@@ -115,7 +115,11 @@ export async function POST(req: NextRequest) {
   const result = await generateTrip({
     prompt: body.prompt,
     places,
-    days: body.days,
+    // 防直打 API 的浮點/非正數 days 汙染天數硬指令與 max_tokens 計算（UI 只會送正整數）
+    days:
+      typeof body.days === "number" && Number.isInteger(body.days) && body.days > 0
+        ? body.days
+        : undefined,
     style: body.style,
     budgetMin: body.budgetMin,
     budgetMax: body.budgetMax,
@@ -170,6 +174,8 @@ export async function POST(req: NextRequest) {
         }
       }
 
+      // ⚠️ 下面兩種 push 的文案是 lib/trip-edit.ts ROUTE_INSIGHT_RE 的過濾對象
+      //（編輯儲存時清掉過期車程資訊）——改字要兩邊同步。
       if (!allResolved) {
         trip.insights.push(`第 ${day.day} 天有地點無法定位，未估移動時間`);
         continue;

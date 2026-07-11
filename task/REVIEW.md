@@ -1,132 +1,204 @@
-# GLM Review — Flight Lookup（AviationStack 帶航線+時刻）
+# REVIEW — GLM-5.2 異質審查（三項修正）
 
-- **時間戳**：round 1 = 2026-07-10 02:19（+0800）；round 2 = 2026-07-10 02:25:12 +0800
-- **審查者**：GLM-5.2（MCP glm-reviewer.review_code）
-- **審查範圍**：lib/aviationstack.ts、app/api/flight/lookup/route.ts、lib/quotas.ts、components/bookings.tsx、lib/__tests__/aviationstack.test.ts、.env.example（diff 見 task/diff.patch）
-- **focus**：security, type-safety, 時區換算, 前端非同步 state（closure/race）, 用量護欄
+> 時間戳：2026-07-11 13:55–14:12（Asia/Taipei）；第 1 輪三批 + 第 2 輪 delta
+> 審查範圍：`feat/three-fixes` 分支——修正一（生成天數完整性）/ 修正二（編輯本地重排）/ 修正三（航班換源 AeroDataBox）；完整 diff 見 task/diff.patch
+> 審查者：GLM-5.2（MCP `glm-reviewer.review_code`）。以下回傳內容**原封不動**，仲裁標註接在各批之後。
 
 ---
 
-## Round 1 — GLM 原始回傳（原封不動）
+## 第 1 輪・批 1（修正一：lib/trip-days.ts、lib/anthropic.ts、schema/trip.ts + 測試）
 
-這份程式碼整體架構紮實，Result pattern 與型別定義都做得不錯，但在我特別關注的幾個領域仍存在一些盲點。以下是審查意見：
+這份程式碼在邏輯與架構上做出了不錯的修正，但存在幾個會導致執行失敗的嚴重瑕疵，以及一些邊界情況的風險。以下是我的審查意見：
 
 ### 🐛 問題點
 
-**1. 前端非同步 State 導致 Race Condition 與資料錯置**
-`bookings.tsx` 中使用陣列索引 `i` 作為 `lookup` state 的 key，並在 `onFlightsChange` 中也用 `idx === i` 來更新對應的航班。如果使用者在按下「查航班」後、API 回傳前，新增或刪除了前面的航班欄位，導致 `flights` 陣列長度或順序改變，當 API 回傳時 `i` 就會指向錯誤的航班列，將查詢結果覆寫到錯誤的行程上。這是一個典型的 closure 捕獲過期 index 的邏輯瑕疵。
+1. **`numFrom` 的正規表達式無法正確匹配「十」**
+   `lib/trip-days.ts` 中 `numFrom` 的正規表達式為 `^([一兩二三四五六七八九])?(十)?([一二三四五六七八九])?$`。
+   當輸入為「十」時，`m[1]` 為 `undefined`，`m[2]` 為「十」，`m[3]` 為 `undefined`。
+   此時進入 `return (m[1] ? CN_DIGIT[m[1]] : 1) * 10 + (m[3] ? CN_DIGIT[m[3]] : 0);`，回傳 `10`。
+   **但是**，當輸入為「二十」時，`m[1]` 為「二」，`m[2]` 為「十」，`m[3]` 為 `undefined`，回傳 `20`。
+   看似沒問題，但如果今天輸入的是「十」以外的純中文數字，例如「十五」，`m[1]` 為 `undefined`，`m[2]` 為「十」，`m[3]` 為「五」，回傳 `15`。
+   真正的問題在於：如果輸入是「兩十」（雖然人類不這樣寫，但 regex 會匹配），`m[1]` 為「兩」，`m[2]` 為「十」，會回傳 `20`。
+   更嚴重的是，**如果輸入為「十」，`m[1]` 是 `undefined`，但 `m[2]` 存在，這段邏輯是正確的。** 不過，請注意 `if (!m || (!m[1] && !m[2])) return undefined;` 這行防呆。如果輸入是「十」，`m[2]` 存在，不會 return undefined。但如果輸入是「零」，`m[1]` 為 `undefined`，`m[2]` 為 `undefined`，會被擋下。這部分邏輯正確。
+   **然而**，`PATTERNS` 中的 `NUM` 定義為 `\\d+|[一兩二三四五六七八九十]{1,3}`。這會導致「三十」被匹配，但 `numFrom` 的 regex 並不支援百位數或「三十」這種十位數的組合（因為 `m[2]` 只允許單獨一個「十」）。當輸入「三十天」時，`PATTERNS` 抓到「三十」，`numFrom("三十")` 會因為 regex 不匹配而回傳 `undefined`，導致推斷失效。
 
-**2. Regex 驗證與正規化邏輯不一致**
-`route.ts` 中的 Regex `/^[0-9A-Za-z]{2}\s?\d{1,4}[A-Za-z]?$/` 允許中間帶空白（如 `BR 198`）。但在 `lib/aviationstack.ts` 中，`iata` 經過 `.replace(/\s+/g, "")` 去除了空白。雖然不會導致崩潰，但 Regex 的設計與實際發送給 API 的行為不一致，應在進入 API 層前統一正規化，或讓 Regex 反映實際行為。
+2. **`generateTrip` 的 retry 迴圈在發生非預期例外時不會重試**
+   如果 API 呼叫因為網路問題或 Rate limit 丟出 `APIError`，這段程式碼會直接 `return err({ kind: "api_error" ... })`，完全不進行重試。這與「格式錯誤或天數不完整 → 帶修正指示重試 1 次」的設計意圖不符。如果第一次因為網路抖動失敗，使用者拿不到結果，也沒有第二次機會。
 
 ### ⚠️ 風險
 
-**1. 時區換算的隱性風險**
-`hhmmFromScheduled` 依賴 `Intl.DateTimeFormat` 處理時區，這部分邏輯正確。但 `scheduled` 字串若未帶有絕對時區資訊（例如 AviationStack 偶爾回傳 `2023-10-25T09:00:00` 而非 `+00:00`），JavaScript 的 `new Date()` 會將其視為「本地時間」解析，這會導致起降時間計算完全錯誤。建議在 `new Date(scheduledIso)` 之前，檢查字串是否包含時區標記，若無則強制補上 `Z` 或 `+00:00` 以確保以 UTC 解析。
+1. **`inferMinDays` 容易誤判非天數訊號**
+   `PATTERNS` 中的 `(${NUM})\s*天` 會匹配任何包含「數字 + 天」的字詞。例如：
+   - 「**一**天到晚都要玩」→ 匹配到「一天」，推斷為 1 天。
+   - 「這**兩天**心情不好，想出國」→ 匹配到「兩天」，推斷為 2 天。
+   - 「**三天兩頭**出問題，想請假」→ 匹配到「三天」，推斷為 3 天。
+   這會導致 AI 被硬性限制只能生成 1~3 天的行程，即使使用者的意圖是長天數旅行。這在 NLP 推斷中是常見的 false positive 風險。
 
-**2. API Key 透過 Query String 傳遞的資安疑慮**
-`url = ${base}/flights?access_key=${encodeURIComponent(key)}` 將 API Key 放在 URL 中。雖然這是 AviationStack 的要求，但 Query String 可能會被某些中間件、日誌記錄器或 Next.js 的底層 fetch 實作記錄下來。在正式環境中需確保伺服器日誌不會完整記錄 request URL。
+2. **`max_tokens` 動態計算可能不足以容納長天數行程**
+   `Math.min(24576, Math.max(8192, expectedDays * 2000 + 2000))`。
+   如果 `expectedDays` 為 10，`max_tokens` 為 22000。如果每一天有 10 個 schedule items，10 天可能會有 100 個 items，很容易超過 22000 tokens。一旦超過，`stop_reason` 會變成 `max_tokens`，被當作 refusal 退回，導致長天數行程永遠無法生成。
 
-**3. 用量護欄的 Fail-open 策略**
-背景提到 `checkAndConsume` 採用 fail-open。對於付費且額度有限的 API，如果 quota 服務短暫故障導致 fail-open，使用者可以無限制呼叫，可能會瞬間耗損 100 次/月的免費額度。對於這種剛性額度限制的第三方 API，是否該考慮 fail-close 或至少在伺服器端加上本地記憶體的粗略次數限制？
+3. **`superRefine` 對舊 Firestore 文件的影響評估過於樂觀**
+   背景說明提到：「正常生成都連續」。但這忽略了**手動編輯**或**外部系統寫入**的可能性。如果在 Firestore console 中手動修改了一份行程，不小心刪除了中間的一天（例如 day 2），這份文件在下次 PATCH 時會被 `superRefine` 擋下，導致使用者無法儲存任何修改。這會是一個很難排查的線上事故。
 
-**4. 前端 `onFlightsChange` 的更新策略**
-`airline: f.airline.trim() === "" && data.airline ? data.airline : f.airline` 這個邏輯表示只有當原本航空公司為空時才帶入。但 `from`, `to`, `departTime`, `arriveTime` 卻是無條件覆寫（`data.from ?? f.from`）。如果使用者手動修改了出發地，查詢後會被覆蓋掉，這個 UX 風險需要評估。
+4. **`durationMin` 缺乏上限與現實合理性驗證**
+   AI 可能會生成 `durationMin: 1440`（24 小時）甚至更大的數字。雖然不會導致程式崩潰，但這會讓後續排程檢查出現不合理數據。建議加上 `.max(1440)` 或更合理的上限。
 
 ### 💡 建議
 
-**1. 統一航班號正規化**
-建議在 `route.ts` 收到 `flightNo` 後，立刻 `flightNo = flightNo.trim().toUpperCase().replace(/\s+/g, "")`，然後再拿去驗證與傳遞。這樣 Regex 可以簡化為 `/^[0-9A-Z]{2}\d{1,4}[A-Z]?$/`，且不需要在 `aviationstack.ts` 裡再做一次 `replace`。
-
-**2. 時區 fallback 的防禦性**
-在 `hhmmFromScheduled` 中，如果 `timezone` 為空且走到 Regex fallback，取出的時間是 UTC 時間。但 UI 上顯示的沒有時區標記，使用者會誤以為是當地時間。建議在無 timezone 資訊時，至少不要回傳未轉換的 UTC 時間，或明確標示。
+1. **修正 `numFrom` 支援「三十」、「四十」等十位數**：將 `numFrom` 的正規表達式改為支援百位數以下的所有中文數字，或直接使用成熟的中文數字解析套件。
+2. **`generateTrip` 的 retry 機制應區分錯誤類型**：建議將 `APIError`（如 429, 500, 503）也納入重試條件。
+3. **`checkDayCoverage` 的 reason 可以更精確**：區分「不從 1 開始」與「跳號」，有助於 AI 在重試時修正。
 
 ### ❓ 待釐清問題
 
-1. **AviationStack 回傳的 `scheduled` 欄位格式是否絕對包含時區（如 `+00:00` 或 `Z`）？** 如果不保證，目前的時區轉換在邊界情況下會出錯。
-2. **`checkAndConsume` 的 fail-open 是基於什麼考量？** 對於這種「對外付費/有限額」的 API，通常會傾向 fail-close 以保護額度，想了解這裡選擇 fail-open 的原因。
-3. **`bookings.tsx` 的 Race Condition**：既有 `flights` 清單以 index 作為 React key 已經是個壞味道，如果清單支援刪除/排序，不僅查詢狀態會錯亂，React 的 reconciliation 也可能出錯。是否有計畫改用 stable unique ID？
+1. **為什麼 `PATTERNS` 中要包含 `兩` 和 `二`，卻不包含 `壹`、`貳` 等大寫中文數字？**
+2. **`SYSTEM_PROMPT` 中新增的範例 `"durationMin": 90`，是否會誤導 AI 所有活動都填 90？** 是否有考慮在 prompt 中明確說明「durationMin 視活動而定，例如交通 30、景點 90、吃飯 60」？
+
+### ✅ 批 1 仲裁
+
+| # | 判定 | 處置 |
+|---|---|---|
+| 🐛-1 numFrom 不支援「三十」 | **[FALSE POSITIVE]** | regex `([一兩二三四五六七八九])?(十)?(…)?` 對「三十」給 m[1]=三、m[2]=十 → 回 30；GLM 論述中段自己演示「二十」正確回 20，結論自相矛盾。單測「十二天→12、二十一天→21」通過即反證。 |
+| 🐛-2 APIError 不重試 | 非 bug，不修（P2） | 既有行為未回歸；網路/餘額錯誤重試是另一類機制（多燒成本、429 重試更糟），本輪 scope 是天數完整性。記錄。 |
+| ⚠️-1 慣用語誤判 | **真，已修** | 加 `IDIOM_RE` 黑名單（三天兩頭/一天到晚/這兩天/前兩天/過兩天/三天打魚/兩天曬網）剔除後再匹配＋2 條新單測。 |
+| ⚠️-2 max_tokens 不足 | 部分真，**已修** | 上蓋 24576 → 32000。註：截斷是顯性 refusal（stop_reason 檢查），不會靜默缺天，「永遠無法生成」過重。 |
+| ⚠️-3 superRefine 擋手改舊文件 | 真，已知取捨，不修 | PLAN 已列、peanut 核准。行程編輯儲存會自動重編號（自我修復）；僅 saveBookings 路徑可能遇到，錯誤訊息可循線排查。 |
+| ⚠️-4 durationMin 無上限 | **真，已修** | schema 加 `.max(1440)` ＋單測（1440 合法、1441 不合法）。 |
+| 建議-3 reason 精確化 | 不修（P2） | reason 已含實際編號列表，重試訊息足夠。 |
+| ❓-1 大寫中文數字 | 有意省略 | 口語 prompt 幾乎不用壹貳參；日後可增補。 |
+| ❓-2 範例錨定 90 | **真，已修** | prompt 改「視活動而定，例：交通 30、景點 90、用餐 60；不要一律填同一個數字」。 |
 
 ---
 
-## Round 1 — 仲裁（逐條，經實際驗證）
+## 第 1 輪・批 2（修正二：lib/trip-edit.ts、app/trips/[id]/page.tsx、app/trip/page.tsx + 測試）
 
-### 🐛-1 前端非同步 race / stale index — **真（P2），已修**
-真。我新增的 async 回填用 render 期閉包的 `flights` 陣列重建，若查詢期間使用者改動列，會覆寫並行編輯或寫錯列。**已修**：`onFlightsChange` 型別放寬為 `Dispatch<SetStateAction<FlightDraft[]>>`（兩呼叫端都直傳 `setFlightDrafts`），回填改 **functional update（讀最新 state）+ 身分守衛 `idx===i && f.flightNo.trim()===flightNo`**——列被增刪/改號時放棄回填，不覆寫。
+### 🐛 問題點
 
-### 🐛-2 regex 與正規化不一致 — **真（小），已修**
-真（`BR 198` 帶空白通過 regex 但送 API 前被去空白）。**已修**：route 收到後先 `trim().toUpperCase().replace(/\s+/g,"")` 再驗證，regex 簡化為 `/^[0-9A-Z]{2}\d{1,4}[A-Z]?$/`，與實際送 API 字串一致。
-
-### ⚠️-1 scheduled 缺時區標記 → new Date 當本地 — **真（邊界），已修**
-真。SPEC 實測 scheduled 帶 `+00:00`，但缺 offset 時 `new Date` 會當伺服器本地時間。**已修**：`hhmmFromScheduled` 先測 `/(?:Z|[+-]\d{2}:?\d{2})$/`，缺標記則補 `Z` 強制 UTC 解析；新增單測 `("2026-07-09T09:00:00","Asia/Taipei")→"17:00"`。
-
-### ⚠️-2 API key 在 query string — **真但已符合，不改**
-真（AviationStack 強制 key 進 query）。但本程式**不記錄也不回傳完整 URL**：`api_error` 訊息只含 `res.status` + body 片段（非 URL），且被 route 對映成通用訊息（不回給前端）、route 未 `console.log` 該錯誤。key 不進日誌/回應。無需改碼；正式站僅需確保平台不整段記 request URL（維運層，記 known issue）。
-
-### ⚠️-3 fail-open 對硬額度 API — **真但屬 peanut 全域政策，不改（記 known issue）**
-真。fail-open 是 peanut 全域決策（2026-07-09：限流基礎設施抖動不該擋掉所有付費入口）。此入口 requireUid + 按鈕觸發，Firestore 故障期間的曝險有限但確存在。是否對「硬月額度」API 改 fail-close / 加本地粗略計數＝政策取捨，交 peanut，記 known issue。
-
-### ⚠️-4 from/to/time 無條件覆寫 vs airline 只補空 — **真但 BY DESIGN（SPEC §2.4/§3）**
-這是 SPEC 明定行為：使用者**明確按了查航班**要帶航線+時刻，故一律帶入；airline 因第一層/手填優先而只補空（SPEC §3「airline 不蓋」）。非缺陷。
-
-### 💡-1 統一正規化 — **已採納**（見 🐛-2 修正）。
-### 💡-2 fallback 回未標記 UTC — **不修**：real data 一律帶 timezone、幾乎不走 fallback；且全 app 的 HH:mm 本就無時區標記（既有慣例），fallback 為 best-effort。記 known issue。
-
-### ❓-1 scheduled 是否必帶時區 — 已由 ⚠️-1 補 Z 防禦（不保證亦不會算錯）。
-### ❓-2 fail-open 理由 — peanut 全域政策（見 ⚠️-3）。
-### ❓-3 index 當 key / stable ID — 全 app 既有慣例；本輪的 functional update + 身分守衛已擋掉 async 資料錯置；改 stable ID 是跨 bookings 系統重構，超出本 SPEC，記 known issue。
-
----
-
-## Round 2 — GLM 原始回傳（審三處修正，原封不動）
-
-## 🐛 問題點
 無。
 
-## ⚠️ 風險
+### ⚠️ 風險
 
-1. **修正 A — `flights[i]?.flightNo` 仍讀自 stale closure（渲染期快照）**
-   雖然 `onFlightsChange` 已正確改用 functional update 來寫入，但函式開頭讀取航班號的 `const flightNo = flights[i]?.flightNo.trim() ?? "";` 這行的 `flights` 依然是當前渲染閉包裡的快照。如果在非同步請求發起前，使用者快速修改了該欄位，`flightNo` 拿到的會是舊值，並將舊值發送給 API。
-   這不會導致崩潰，且因為身分守衛 `f.flightNo.trim() === flightNo` 的保護，最終不會把錯誤資料寫回 state（因為最新 state 的欄位已經改變，守衛會失敗而放棄回填）。但這會發送一個無效的 API 請求，浪費資源且可能讓使用者困惑（查了舊航班號）。
+1. **跨日行程時間被截斷**：
+   `reflowTimes` 將時間 Clamp 在 `23:59`。如果當天的排程項目較多或 `effDurationMin` 較長，累加時間超出當天時，後續所有項目的 `time` 都會被壓在 `23:59`。這在 Schema 上可能符合 regex，但多個項目共用同一個時間會導致前端顯示錯亂，且失去時間排序意義。
 
-2. **修正 B — Regex 限制過於嚴格，可能擋住合法航班號**
-   Regex `^[0-9A-Z]{2}\d{1,4}[A-Z]?$` 強制開頭必須是「兩個字元」。這對於 IATA 標準是正確的。但對於 ICAO 標準（3 碼航空代碼 + 數字，如 EVA198）將會被直接拒絕。若未來系統需要接軌 ICAO 航班號，此 regex 會成為阻礙。
+2. **`isRouteInsight` 正則匹配範圍過窄**：
+   目前的正則 `^第\s*\d+\s*天(移動時間約|有地點無法定位)` 過於寫死。如果未來生成端調整了提示文字（例如改成「車程約」、「路線規劃失敗」等），過期的 insights 就會被遺留在行程中，再次造成誤導。這是一個高耦合且脆弱的防護機制。
 
-3. **修正 C — 無時區的 fallback 正規表達式不夠精確**
-   `scheduledIso.match(/T(\d{2}:\d{2})/)` 這個 fallback 會貪婪匹配字串中任何 `T` 後面跟著時間格式的部分。雖然在標準 ISO 格式下不會出錯，但如果傳入的時間字串格式非預期（例如 `2026-07-09T09:00:00T10:00:00`），可能會匹配到錯誤的位置。建議加上行首或更嚴格的日期限制。
+3. **`ScheduleItem` 型別重複定義**：
+   `app/trip/page.tsx` 與 `app/trips/[id]/page.tsx` 都各自定義了 `ScheduleItem` 並分別加上了 `durationMin?`。這種分散定義很容易在未來新增欄位時漏改其一，導致型別不一致。
 
-## 💡 建議
+4. **刪除空天重新編號的 UX 風險**：
+   當使用者刪光某天的行程並儲存後，後面的天數會被重新連續編號。如果使用者只是想「清空」某天稍後再補，儲存後會發現天數平移，可能與預期不符。
 
-1. **修正 A — 考慮將 `flightNo` 作為參數傳遞**：直接將當前的 `flightNo` 作為參數傳入，避免 stale closure 的尷尬期。
-2. **修正 B — Regex 可讀性**：`[0-9A-Z]{2}` 允許數字開頭（例如 `12345`）。若要嚴格限制應改為 `^[A-Z]{2}\d{1,4}[A-Z]?$`，並加註解說明為何允許數字開頭。
+### 💡 建議
 
-## ❓ 待釐清問題
+1. **統一型別定義**：將 `ScheduleItem`、`TripDay` 等型別抽出到共用的 `types/trip.ts` 或直接引用 `@/schema/trip`。
+2. **`isRouteInsight` 改用列舉或標記**：在生成 Insight 時加上固定的 prefix（如 `[ROUTE]`）或改用結構化物件（如 `{ type: 'route', text: '...' }`），儲存時直接判斷 `type`，不用擔心文案修改導致防護失效。
 
-1. **修正 A — `flights` 的來源**：是 props 還是 useSelector？`lookupFlightRow` 有沒有被 useCallback 包住、dependency array 有沒有正確包含 `flights`？
-2. **修正 B — `lookupFlight` 內部的重複正規化**：既然 route 已保證正規化，是否應把正規化統一收在 route 層？
-3. **修正 C — `timezone` 的來源與格式**：是使用者輸入還是資料庫？若傳入 `UTC+8` 這種非 IANA 格式，Intl 會拋錯並 fallback，是否符合預期？
+### ❓ 待釐清問題
 
----
+1. `effectiveDurations` 中，如果原始排程的時間是亂序（例如 10:00, 09:00, 11:00），差分計算會因 `next > cur` 失敗而退回到 `durationMin` 或預設值。請問原始資料保證時間一定是遞增的嗎？
+2. `saveEdit` 中過濾 `isRouteInsight` 時，是直接拿 `view.trip.insights` 來過濾。如果只是清洗歷史資料，為什麼不在資料庫層級或第一次讀取時處理掉，而是放在每次 `saveEdit` 時過濾？
 
-## Round 2 — 仲裁
+### ✅ 批 2 仲裁
 
-### ⚠️-1 flightNo 讀自 stale closure — **[FALSE POSITIVE]**
-`const flightNo = flights[i]?.flightNo.trim()` 在 `lookupFlightRow` **開頭同步執行**（任何 await 之前）。onClick 綁的是**最新一次 render 的閉包**（每次 keystroke 都重渲染），故點擊當下讀到的即當前值——**不存在「發起請求前的 stale 窗口」**。加上身分守衛保護寫入。GLM 假設的「非同步請求發起前修改」與同步捕獲時序矛盾。無需改。
-
-### ⚠️-2 / 💡-2 regex 拒 ICAO / 應改 `[A-Z]{2}` — **[FALSE POSITIVE，且採納會造成 regression]**
-AviationStack `flight_iata` 參數用的是 **IATA（2 碼）**，本功能全線以 IATA 為基礎（`airlineFromFlightNo` 亦解 2 碼）；ICAO 3 碼不被該 endpoint 參數支援，拒絕是正確。且 `IATA_AIRLINES` 表含 **數字開頭代碼 `7C`（濟州）、`5J`（宿霧）、`3K`、`B7`**——若照 💡-2 改成 `[A-Z]{2}` 會**擋掉這些合法航空**（regression）。維持 `[0-9A-Z]{2}`（已加註）。
-
-### ⚠️-3 fallback regex 貪婪匹配 — **真但可忽略，不修**
-`.match`（無 /g）回**第一個** `T(\d{2}:\d{2})` → 正常 ISO 取到正確 HH:mm。GLM 舉的 `...T09:00:00T10:00:00` 非合法 ISO、非 AviationStack 真實資料。best-effort fallback、第一匹配即正確。記 known issue（可選加嚴）。
-
-### ❓-1 lookupFlightRow 是否 useCallback — 已釐清：**非** useCallback，定義在 component body、**每次 render 產生新閉包**含當前 `flights`（來自同組件 props/state），無 stale-first-render 問題。
-### ❓-2 lookupFlight 重複正規化 — 已釐清：**刻意防禦**。`lookupFlight` 是 lib 函式，可能被 route 以外（測試/未來呼叫端）直接呼叫，不假設呼叫端已正規化；route + lib 各自正規化為 defense-in-depth，冪等無害。
-### ❓-3 timezone 來源/格式 — 已釐清：來自 **AviationStack 回應**（`dep.timezone`/`arr.timezone`，IANA 字串如 `Asia/Taipei`），非使用者輸入；非 IANA 值由 try-catch 落 fallback，符合預期。
+| # | 判定 | 處置 |
+|---|---|---|
+| ⚠️-1 clamp 23:59 疊項 | 真但罕見，不修（P2） | 刪除只會縮短總時長；排序不改變總時長（僅末項預設 60 分插入中段時可能外溢）。原始排程本就收在午夜前，實務難觸發；UI 已說明重排規則。 |
+| ⚠️-2 ROUTE_INSIGHT_RE 脆弱耦合 | **真，已修（減害）** | generate route 兩個 push 點加「改字要兩邊同步」警示註解。結構化 insights（schema 改造）屬原選項 A 範圍，本輪 scope 外。 |
+| ⚠️-3 ScheduleItem 重複定義 | 既有慣例，不修（P2） | 頁面本地型別是本 repo 既有模式（早於本輪）；本輪兩處已同步。統一型別留待重構任務。 |
+| ⚠️-4 空天重編號 UX | 設計如此，不修 | 空天卡片文案已明示「儲存時會移除此天並重新編號」。 |
+| ❓-1 亂序差分 | 已處理 | 不保證遞增（排序後就會亂序）——所以才有 fallback durationMin → 60，單測覆蓋。 |
+| ❓-2 為何不在 DB 層清洗 | 設計說明 | 免資料遷移：車程 insights 只在生成時寫入，「編輯儲存」正是它過期的時點，在此清洗即涵蓋全部；讀取端清洗會造成顯示與儲存不一致。 |
 
 ---
 
-## 結論
-- Round 1：🐛×2 **皆真，已修**（race → functional update + 身分守衛；regex 不一致 → route 先正規化）。⚠️×4 中 1 真已修（補 Z）、1 真已符合（key 不入日誌）、2 真但屬 peanut 政策/SPEC 設計；💡×2 一採納一記錄。
-- Round 2：🐛×0。⚠️/💡/❓ 皆 **FALSE POSITIVE 或已釐清**；GLM 的 💡-2（改 `[A-Z]{2}`）**若採納會擋掉 7C/5J/3K/B7 等合法航空**，正確地未採納。
-- **現無 P0/P1 未修缺陷**；達 2 輪上限、無殘留真缺陷，收斂。
-- Known issues（交 peanut）：fail-open vs 硬月額度、正式站日誌勿記完整 URL、fallback 未標記時區/可加嚴、bookings 全面改 stable ID。
+## 第 1 輪・批 3（修正三：lib/aerodatabox.ts、app/api/flight/lookup/route.ts、components/bookings.tsx、lib/aviationstack.ts、lib/quotas.ts、.env.example + 測試）
+
+這份程式碼看得出來有經過深思熟慮，特別是前端在並行查詢時的「身分守衛」做得不錯。但作為審查員，我還是找到了幾個必須正視的盲點。
+
+### 🐛 問題點
+無。
+
+### ⚠️ 風險
+
+1. **未指定日期時的「UTC 今日」近似法會產生跨日邊界錯誤**
+   `const date = dateLocal ?? new Date().toISOString().slice(0, 10);`
+   當使用者未填日期時，你使用伺服器的 UTC 日期去查班表。如果使用者身在台灣（UTC+8），在當地時間 00:00 ~ 08:00 之間查詢「今天」的航班，UTC 日期其實還是昨天。這會導致 API 查到昨天的班表，回傳的 `dataDate` 也會是昨天，接著前端會顯示「未填日期，帶入 昨天日期 的班表」，這對使用者來說會非常困惑（「我明明要查今天的紅眼航班，為什麼帶入昨天？」）。
+   既然 AeroDataBox 號稱可以查當地時間，建議未填日期時，至少用伺服器時間以特定時區（如 UTC+8 或系統主要時區）來取日期，或者強制前端必須帶入日期。
+
+2. **`pickFlight` 排序邏輯在跨日航班中可能失效**
+   `splitLocalDateTime` 只截取 `YYYY-MM-DD` 和 `HH:mm`，丟棄了時區資訊。純字串排序在不同時區機場混雜的極端情況下可能產生非預期的順序。不過這屬於極端邊界情況。
+
+3. **`AERODATABOX_BASE_URL` 替換風險**
+   `envOr` 允許替換 base URL，且 `x-rapidapi-host` 是從這個 URL 動態推導的。如果在測試或開發環境設定了內網 IP 或錯誤的 URL，`new URL(base).host` 雖然不會報錯，但會發送帶有正式 `x-rapidapi-key` 的請求到未知主機，有 API Key 洩漏的風險。建議在非生產環境使用替換 URL 時，應有防護機制（如不帶入真實 key）。
+
+### 💡 建議
+
+1. **簡化前端訊息三元運算子**（抽出小函式或改寫得更扁平）。
+2. **`splitLocalDateTime` 的正規表達式可以更嚴謹**：目前 `/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/` 可以匹配到 `2026-07-25 08:05`，但如果傳入 `2026-07-25 08:5`（少一個零）也會匹配到 `08:5`。
+
+### ❓ 待釐清問題
+
+1. **關於「未填日期則查今日班表並提示」的產品決策**：把「日期」設為必填，是不是更能從源頭避免查到錯誤班表的問題？目前設計成「可選」是否是為了向下相容舊的 UI 體驗？
+2. **`lib/aviationstack.ts` 的保留策略**：請問未來有計畫完全移除這個檔案與其單測嗎？如果確定不再使用，保留死碼會增加未來維護者的認知負擔。
+
+### ✅ 批 3 仲裁
+
+| # | 判定 | 處置 |
+|---|---|---|
+| ⚠️-1 UTC 今日跨日 | **真，已修** | 未填日期改用 Asia/Taipei 今日（使用者在台灣）；spec §8 已同步記錄取捨與殘餘限制。 |
+| ⚠️-2 跨時區排序 | 理論性，不修（P2） | 同航班號同日的出發機場實務固定；排序 key 為出發地 local 日期時間，同機場內全序正確。 |
+| ⚠️-3 BASE_URL 換掉洩 key | 不修（P2） | env 屬受信部署設定（禁動清單管控），與舊 AviationStack 同模式。 |
+| 建議-1 三元扁平化 | 風格偏好，不修 | 現寫法 lint/typecheck 過、語意清楚。 |
+| 建議-2 regex 會吃 "08:5" | **[FALSE POSITIVE]** | `(\d{2}:\d{2})` 要求分鐘恰為兩位數，"08:5" 不匹配；單測「亂格式 → undefined」覆蓋。 |
+| ❓-1 date 必填？ | 產品決策，維持選填 | 生成表單階段常未定日期；未填有提示文案引導。peanut 可日後改必填。 |
+| ❓-2 aviationstack 保留 | 有意保留 | repo 慣例（比照 scripts/gemini-review.mjs），檔頭已標 deprecated 與原因。 |
+
+---
+
+## 第 2 輪（修正 delta：慣用語黑名單、max_tokens 32000、durationMin 上限、Asia/Taipei 日期、耦合註解、prompt 範例）
+
+### 🐛 問題點
+無。
+
+### ⚠️ 風險
+
+1. **`IDIOM_RE` 漏網之魚與誤刪風險**
+   正規表達式 `IDIOM_RE` 只列了六個慣用語，中文裡帶有數字時間的慣用語還有很多（如「三天三夜」、「兩頭跑」、「一天半天」等）。如果 `PATTERNS` 裡有匹配單一數字的規則，這些未列入黑名單的詞彙仍會被誤判為天數。
+   此外，`IDIOM_RE` 直接將匹配到的字串替換為空字串。若使用者輸入「這兩天我想去五天四夜」，替換掉「這兩天」後變成「我想去五天四夜」，這在當前邏輯是正確的；但若未來有慣用語與實際天數黏在一起（如「三天兩頭跑五天行程」），剔除「三天兩頭」後雖然能抓到「五天」，但語句被破壞可能影響未來其他基於文本的解析邏輯。目前看來可接受，但需留意黑名單維護成本。
+
+2. **`Intl.DateTimeFormat` 環境相依性**
+   `new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Taipei" })` 在舊版 Node.js 或特定建置環境（如被 polyfill 覆蓋的環境）中，行為可能與預期不符。雖然 Next.js 16 的運行環境肯定支援完整的 `Intl`，但這比直接操作 `Date` 更容易受到執行環境的 `Intl` 支援度影響。單元測試若沒有固定時區（如 `TZ=Asia/Taipei`），在 CI 跑測試時可能會因為機器時區不同而產生非預期的失敗。
+
+### 💡 建議
+
+1. **`Intl.DateTimeFormat` 效能優化**：將其提取為模組級別的常數，避免每次呼叫都重新初始化。
+2. **`max_tokens` 計算公式的防禦性**：如果 `expectedDays` 可能是浮點數，`expectedDays * 2000` 會產生小數點，建議確認在傳入前已被取整。
+
+### ❓ 待釐清問題
+
+1. **`PATTERNS` 的具體內容為何？**（確認剔除後不會匹配到奇怪斷句）
+2. **`durationMin` 上限 1440 的合理性**：如果有一個行程是「過夜臥鋪火車」或「跨日長途巴士」，預計佔用時間可能超過 1440 分鐘。請確認這個硬上限是否會導致合理的長時間交通項目被系統拒絕？
+
+### ✅ 第 2 輪仲裁
+
+| # | 判定 | 處置 |
+|---|---|---|
+| ⚠️-1 黑名單維護成本 | 接受，不修 | 黑名單可隨誤判案例增補；誤判後果只是「最低天數」略偏，非阻斷性。 |
+| ⚠️-2 Intl 環境相依 | 不修 | 部署環境 Node 24 full ICU（repo 既有事實，見 lib/aviationstack.ts 註解）；單測未觸日期 fallback 路徑，無 CI 時區風險。 |
+| 建議-1 formatter 提模組層 | **已修** | `TAIPEI_DATE_FMT` 模組常數。 |
+| 建議-2 expectedDays 浮點 | **已修** | generate route 對 body.days 做 `Number.isInteger && > 0` sanitize（UI 只送正整數，防直打 API 的垃圾值）。 |
+| ❓-1 PATTERNS 內容 | 已答 | 三條 pattern（第N天/日、N天、N日遊），數字捕捉群組僅限阿拉伯與中文數字字元。 |
+| ❓-2 1440 vs 跨日交通 | 定義相容 | schedule 是單日時間軸（time 為 HH:mm、無跨日語意），跨日項目本來就需拆到兩天各一項。 |
+
+---
+
+## 統計
+
+- 第 1 輪 findings：🐛 2、⚠️ 11、💡 7、❓ 6；第 2 輪：⚠️ 2、💡 2、❓ 2。
+- **判真並修掉：8 條**（慣用語黑名單、max_tokens 上蓋 32000、durationMin `.max(1440)`、prompt 範例錨定、車程文案耦合註解、Asia/Taipei 預設日期、formatter 模組常數、days sanitize）。
+- **[FALSE POSITIVE]：2 條**（numFrom「三十」、splitLocalDateTime "08:5"）。
+- **記錄不修：12 條**（P2 / 既有慣例 / 已知取捨，理由見各批仲裁表）。
+- 修正後驗證：`pnpm typecheck && pnpm test && pnpm lint && pnpm build` 全綠（14 files / 133 tests）。

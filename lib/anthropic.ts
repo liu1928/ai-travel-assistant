@@ -6,6 +6,7 @@ import type { SavedPlace } from "@/schema/place";
 import type { TravelDna } from "./travel-dna"; // type-only：無 runtime 循環依賴
 import { ok, err, type Result } from "./result";
 import { envOr } from "./env";
+import { inferMinDays, checkDayCoverage } from "./trip-days";
 
 const MODEL = envOr("ANTHROPIC_MODEL", "claude-sonnet-4-6");
 
@@ -134,6 +135,7 @@ Atlas AI 分三個階段：
 - 不可以只列景點
 - 不可以輸出解釋文字
 - 不可以 markdown 說明
+- 不可以只輸出使用者特別提到的那幾天——days 必須涵蓋整趟旅行的每一天
 
 ---
 
@@ -155,9 +157,14 @@ Atlas AI 分三個階段：
           "title": "活動名稱",
           "description": "一行描述",
           "type": "transport | food | place | rest",
-          "location": "可選"
+          "location": "可選",
+          "durationMin": 90
         }
       ]
+    },
+    {
+      "day": 2,
+      "schedule": [ ...同 day 1 結構，每一天都要有完整 schedule... ]
     }
   ],
   "insights": [
@@ -170,7 +177,13 @@ Atlas AI 分三個階段：
   }
 }
 
-重要：time 欄位必須是 24 小時制 HH:mm 格式，例如 "09:00"、"13:30"、"21:00"。`;
+重要：time 欄位必須是 24 小時制 HH:mm 格式，例如 "09:00"、"13:30"、"21:00"。
+
+重要：days 規則（必須全部遵守）：
+- days 必須從 day 1 開始、連續編號（1, 2, 3…），涵蓋整趟旅行的每一天，每天都要有完整 schedule。
+- 使用者提到「第 N 天」的需求時，總天數至少為 N：該需求排進第 N 天，其他每一天也要完整規劃，不可只輸出被提到的那一天。
+- 限制條件有指定天數時，days 的元素數量必須恰好等於指定天數。
+- durationMin 是該項目預計佔用的分鐘數（正整數，視活動而定，例：交通 30、景點 90、用餐 60；上限 1440），每個項目都要填，不要一律填同一個數字。`;
 
 export type HolidayInfo = { date: string; name: string };
 
@@ -224,7 +237,16 @@ export function buildUserMessage(input: GenerateTripInput): string {
     const weekday = Number.isNaN(d.getTime()) ? "" : `（週${WEEKDAY_LABEL[d.getDay()]}）`;
     constraints.push(`出發日期：${input.startDate}${weekday}`);
   }
-  if (input.days) constraints.push(`天數：${input.days} 天`);
+  // 天數是最常被忽略的約束（AI 會鎖定 prompt 裡的「第 N 天」只出那一天），
+  // 有指定 → 硬指令；沒指定 → 從 prompt 推斷最低天數（generateTrip 生成後會照同一標準驗證）
+  if (input.days) {
+    constraints.push(`天數：必須恰好 ${input.days} 天（day 1 到 day ${input.days}，每天都要有完整 schedule）`);
+  } else {
+    const minDays = inferMinDays(input.prompt ?? "");
+    if (minDays) {
+      constraints.push(`天數：至少 ${minDays} 天（依你的輸入推斷；days 仍須從 day 1 連續涵蓋到最後一天）`);
+    }
+  }
   if (input.style) constraints.push(`風格偏好：${input.style}`);
   if (typeof input.budgetMin === "number" || typeof input.budgetMax === "number") {
     constraints.push(`預算範圍：${input.budgetMin ?? 0} ~ ${input.budgetMax ?? 0} 元`);
@@ -371,32 +393,63 @@ export async function generateTrip(
   if (!hasPrompt && !hasPlaces) return err({ kind: "missing_input" });
 
   const client = new Anthropic({ apiKey });
-  const userMessage = buildUserMessage(input);
+  const baseMessage = buildUserMessage(input);
 
-  try {
-    const message = await client.messages.parse({
-      model: MODEL,
-      // 8192：分身模式讓每個 stop 多一句「為你而選」理由 + 每天一個探索點，
-      // 提高輸出量；上調上限避免長天數行程 JSON 被截斷變假性 refusal（GLM REVIEW ⚠️-2）。
-      max_tokens: 8192,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: userMessage }],
-      output_config: { format: tripOutputFormat },
-    });
+  // 天數完整性標準：使用者指定 → 恰好；沒指定 → 從 prompt 推斷最低天數（與 buildUserMessage 同源）
+  const exactDays = input.days;
+  const minDays = exactDays ? undefined : inferMinDays(input.prompt ?? "");
+  const expectedDays = exactDays ?? minDays;
+  // 8192 基準：分身模式讓每個 stop 多一句「為你而選」理由 + 每天一個探索點（GLM REVIEW ⚠️-2）。
+  // 天數硬規則會逼出長天數輸出，輸出量隨天數線性成長 → 動態上調，避免被截斷變假性 refusal。
+  const maxTokens = expectedDays ? Math.min(32000, Math.max(8192, expectedDays * 2000 + 2000)) : 8192;
 
-    if (message.stop_reason !== "end_turn") {
-      return err({ kind: "refusal", stopReason: message.stop_reason });
+  // 格式錯誤或天數不完整 → 帶修正指示重試 1 次；第 2 次仍不符 → refusal（不把缺天結果回給使用者）
+  let correction: string | null = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const userMessage = correction ? `${baseMessage}\n\n${correction}` : baseMessage;
+    try {
+      const message = await client.messages.parse({
+        model: MODEL,
+        max_tokens: maxTokens,
+        system: SYSTEM_PROMPT,
+        messages: [{ role: "user", content: userMessage }],
+        output_config: { format: tripOutputFormat },
+      });
+
+      if (message.stop_reason !== "end_turn") {
+        return err({ kind: "refusal", stopReason: message.stop_reason });
+      }
+
+      if (!message.parsed_output) {
+        return err({ kind: "refusal", stopReason: "no_parsed_output" });
+      }
+
+      const coverage = checkDayCoverage(
+        message.parsed_output.days.map((d) => d.day),
+        { exactDays, minDays },
+      );
+      if (!coverage.ok) {
+        if (attempt === 0) {
+          correction =
+            `⚠️ 你上一次的輸出天數不完整：${coverage.reason}。請重新輸出完整 JSON：` +
+            `days 從 day 1 開始連續編號${exactDays ? `、恰好 ${exactDays} 天` : minDays ? `、至少 ${minDays} 天` : ""}，每天都要有完整 schedule。`;
+          continue;
+        }
+        return err({ kind: "refusal", stopReason: `day_coverage: ${coverage.reason}` });
+      }
+
+      return ok(message.parsed_output);
+    } catch (e) {
+      if (e instanceof TripOutputParseError) {
+        if (attempt === 0) {
+          correction = `⚠️ 你上一次的輸出格式有誤（${e.message}）。請重新輸出完整且符合規格的 JSON。`;
+          continue;
+        }
+        return err({ kind: "refusal", stopReason: e.message });
+      }
+      return err({ kind: "api_error", message: e instanceof Error ? e.message : String(e) });
     }
-
-    if (!message.parsed_output) {
-      return err({ kind: "refusal", stopReason: "no_parsed_output" });
-    }
-
-    return ok(message.parsed_output);
-  } catch (e) {
-    if (e instanceof TripOutputParseError) {
-      return err({ kind: "refusal", stopReason: e.message });
-    }
-    return err({ kind: "api_error", message: e instanceof Error ? e.message : String(e) });
   }
+  // for 迴圈兩輪內必定 return；此行只為 TS 完備性
+  return err({ kind: "refusal", stopReason: "unreachable" });
 }

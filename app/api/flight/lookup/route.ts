@@ -1,10 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireUid } from "@/lib/auth";
 import { checkAndConsume, rateLimitHttp } from "@/lib/rate-limit";
-import { lookupFlight } from "@/lib/aviationstack";
+import { lookupFlight } from "@/lib/aerodatabox";
 
-// 航班號 → 航線 + 起降時刻（AviationStack，真實資料）。按鈕觸發，走用量護欄。
-// 見 specs/flight-lookup.md。
+// 航班號 + 出發日 → 該日排定航線 + 起降時刻（AeroDataBox，真實資料）。按鈕觸發，走用量護欄。
+// 見 specs/flight-lookup.md（2026-07-11 換源：帶日期查未來班表，解換季改時刻查不到的問題）。
 export async function POST(req: NextRequest) {
   const auth = await requireUid(req);
   if (!auth.ok) return NextResponse.json({ error: auth.error.message }, { status: 401 });
@@ -15,7 +15,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: message }, { status, headers: { "Retry-After": String(retryAfterSec) } });
   }
 
-  const body = (await req.json().catch(() => null)) as { flightNo?: unknown } | null;
+  const body = (await req.json().catch(() => null)) as { flightNo?: unknown; date?: unknown } | null;
   // 先正規化（trim/大寫/去空白）再驗證，讓 regex 與實際送 API 的字串一致
   const raw = typeof body?.flightNo === "string" ? body.flightNo : "";
   const flightNo = raw.trim().toUpperCase().replace(/\s+/g, "");
@@ -23,14 +23,19 @@ export async function POST(req: NextRequest) {
   if (!flightNo || !/^[0-9A-Z]{2}\d{1,4}[A-Z]?$/.test(flightNo)) {
     return NextResponse.json({ error: "請輸入有效的航班號（如 BR198）" }, { status: 400 });
   }
+  // 出發日可選；有帶就必須是 YYYY-MM-DD（同上，先擋掉再打 API）
+  const rawDate = typeof body?.date === "string" ? body.date.trim() : "";
+  if (rawDate && !/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
+    return NextResponse.json({ error: "日期格式不正確（需為 YYYY-MM-DD）" }, { status: 400 });
+  }
 
-  const result = await lookupFlight(flightNo);
+  const result = await lookupFlight(flightNo, rawDate || undefined);
   if (!result.ok) {
     switch (result.error.kind) {
       case "not_found":
-        return NextResponse.json({ error: "查無此航班（或今日無班次）" }, { status: 404 });
+        return NextResponse.json({ error: "查無此航班（該日期可能沒有班次）" }, { status: 404 });
       case "missing_key":
-        return NextResponse.json({ error: "伺服器尚未設定 AviationStack 金鑰" }, { status: 500 });
+        return NextResponse.json({ error: "伺服器尚未設定 AeroDataBox 金鑰" }, { status: 500 });
       case "api_error":
         return NextResponse.json({ error: "航班查詢服務暫時無法使用" }, { status: 502 });
     }

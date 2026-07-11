@@ -14,6 +14,9 @@ export const scheduleItemSchema = z.object({
   description: z.string().min(1),
   type: scheduleItemType,
   location: z.string().optional(),
+  // 預計佔用分鐘數（AI 生成帶出）；編輯本地重排的時長來源之一。optional：舊資料免遷移。
+  // 上限一天（1440）：防 AI 生成離譜時長汙染重排計算（GLM REVIEW 2026-07-11 ⚠️-4）。
+  durationMin: z.number().int().positive().max(1440).optional(),
 });
 export type ScheduleItem = z.infer<typeof scheduleItemSchema>;
 
@@ -36,7 +39,20 @@ export const tripSchema = z.object({
   location: z.string().min(1),
   style: tripStyle,
   summary: z.string().min(1),
-  days: z.array(tripDaySchema).min(1, "days 不可為空"),
+  // day 編號必須從 1 開始連續（防 AI 只輸出「第 3 天」這種缺天結果；refinement 只在
+  // client-side 驗證，structured outputs 的 API 端 grammar 不含此約束）
+  days: z
+    .array(tripDaySchema)
+    .min(1, "days 不可為空")
+    .superRefine((days, ctx) => {
+      const sorted = days.map((d) => d.day).sort((a, b) => a - b);
+      for (let i = 0; i < sorted.length; i++) {
+        if (sorted[i] !== i + 1) {
+          ctx.addIssue({ code: "custom", message: "days 的 day 編號必須從 1 開始且連續" });
+          break;
+        }
+      }
+    }),
   insights: z.array(z.string()),
   budget: tripBudgetSchema,
 });

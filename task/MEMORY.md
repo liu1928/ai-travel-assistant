@@ -5,6 +5,50 @@
 
 ---
 
+## 2026-07-11：三項修正（生成天數 / 編輯重排 / 航班換源 AeroDataBox）
+
+**任務來源**：peanut 回報三個使用問題 → 先做根因調查（每題一調查 agent＋一反方驗證 agent，
+主張全 confirmed 才報告）→ peanut 拍板方案 → PLAN 確認 → 實作。分支 `feat/three-fixes`。
+
+**Root cause（三題都是「機制沒做」，非偶發 bug）**：
+1. 生成缺天：SYSTEM_PROMPT 無天數覆蓋規則＋範例單日偏置；days 端到端 optional；
+   schema 只驗 ≥1 天（`z.array().min()` 這類約束 SDK 不會送進 structured outputs 的 API 端
+   grammar，只在 client 驗）。→ 修法三層：prompt 硬規則＋`inferMinDays` 推斷＋生成後
+   `checkDayCoverage` 驗證重試（比照 lib/tagging.ts「務必涵蓋每一個編號」的既有模式）。
+2. 編輯不重排：time 是無時長概念的字串、PATCH 純覆蓋、Routes 增值只有生成一個入口。
+   → 免 LLM 本地重排：**差分優先**（相鄰 time 差當有效時長，舊行程零遷移可用）→
+   durationMin（新欄位，AI 生成帶出）→ 預設 60。PLAN 原寫 durationMin 優先，實作時想清楚
+   改差分優先——刪中間項後項剛好提前被刪項原佔時段，沒動到的項目不飄移。
+3. 航班舊時刻：AviationStack 免費層 /flights 不帶日期只回「今天這班」，表單日期根本沒送出，
+   資料日期在解析層被丟棄。**不是資料過期，是查錯日期**。→ 換 AeroDataBox：
+   `GET /flights/number/{no}/{dateLocal}` 原生航班號+日期直查（免費層未來 365 天）。
+
+**供應商評比（經官方原文複核，未來換源可參考）**：AeroDataBox（RapidAPI $0、直查、local 時間
+自帶）＞ Amadeus（production 2000 次/月免費但要簽約+72h 審核、LCC 覆蓋風險）＞ FlightAware
+（$5/月免費額度但回 UTC 要自己轉時區）＞ AviationStack 升 Basic（$49.99/月仍是機場式查詢，否決）。
+AeroDataBox 注意：回應是**陣列**、local 時間就地切（跟 AviationStack 的 UTC 坑相反）、
+換季班表最慢 2 週反映、免費層需綁卡（hard limit 不扣款）。
+
+**GLM 仲裁（兩輪，8 修/2 假/12 不修）**：
+- 兩條 [FALSE POSITIVE] 又是「反例自己沒驗」型：說 regex 不支援「三十」（實際 m[1]=三 m[2]=十
+  → 30，且它自己論述中段演示「二十」是對的、結論自相矛盾）；說 `\d{2}:\d{2}` 會吃 "08:5"（不會）。
+  **GLM 給的具體反例一律自己跑一次再判**（本 repo 第三次驗證此鐵律）。
+- 真 finding 裡最有價值的兩條：`inferMinDays` 慣用語誤判（三天兩頭/這兩天→黑名單剔除）、
+  未填日期用 UTC 今日會在台北清晨查到前一天（→ Asia/Taipei formatter）。中文 NLP 推斷
+  與「今日」語意都要想時區與慣用語。
+
+**流程/環境踩雷**：
+- PowerShell `>` 重導又產 UTF-16（上輪已記過，這輪又踩一次才想起來）——**產 diff 一律用
+  Bash tool**。已知教訓要在動手前翻 MEMORY，不是踩到才想起。
+- superRefine 放在 `z.array(...).superRefine(...)`（欄位層）不影響 `.extend()`，
+  tripWithBookingsSchema 自動繼承。
+- `pnpm lint` 不含 components/ 的既有限制仍在（靠 typecheck 把關）。
+
+**待 peanut（見 REPORT）**：RapidAPI 註冊+AERODATABOX_API_KEY 進 Secret Manager、
+apphosting.yaml 綁 secret（diff 已列在 REPORT，等確認）、部署後 BR/CI/JX/IT 實測。
+
+---
+
 ## 2026-07-10：Flight Lookup（AviationStack 帶航線+時刻）
 
 **做法**：航班 autofill 第二層。按鈕觸發 → `POST /api/flight/lookup` → `lib/aviationstack.ts`
