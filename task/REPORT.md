@@ -1,10 +1,15 @@
-<!-- 產生日期: 2026-07-11 | 產生模型: claude-fable-5 | 引用 REVIEW.md 時間戳: 2026-07-11 18:15–18:33 (Asia/Taipei) -->
+<!-- 產生日期: 2026-07-11 | 產生模型: claude-fable-5 | 引用 REVIEW.md 時間戳: 2026-07-11 18:15–19:10 (Asia/Taipei)，含批 3 hotfix -->
 
-# REPORT — 修正 JX302 查無航班 / 生成行程對不上週幾與時段
+# REPORT — 修正 JX302 查無航班 / 生成行程對不上週幾與時段（含上線後 hotfix）
 
-> 依據 GLM 審查：`task/REVIEW.md`（本輪）。任務來源：peanut 回報「航班資訊查不到 JX302」「輸入週三早上去美麗海水族館，行程排出來不是在週三也不是在早上」。
+> 依據 GLM 審查：`task/REVIEW.md`（本輪，共三批）。任務來源：peanut 回報「航班資訊查不到 JX302」「輸入週三早上去美麗海水族館，行程排出來不是在週三也不是在早上」。
 > 根因調查：獨立調查 + 反方驗證（含實打 AeroDataBox API），主張全數 confirmed，詳見對話紀錄。
-> 週幾無錨點的處理方式已與 peanut 確認：選「前端擋下、要求先填日期」。分支：`main`（已合併 feat/three-fixes 後的延續改動，尚未 commit/部署，等驗收）。
+> 週幾無錨點的處理方式已與 peanut 確認：選「前端擋下、要求先填日期」。分支：`main`（已合併 feat/three-fixes 後的延續改動）。
+>
+> **⚠️ 部署後追加 hotfix**：批 1、2 部署上線後 peanut 實測 JX302 回報「航班查詢服務暫時無法使用」——
+> 這不是原本要修的「查無資料」問題，是批 1 本身引入的迴歸（Departure→Arrival fallback 兩次請求
+> 背靠背發生，撞上 RapidAPI BASIC 方案 1 req/s 限速）。已用正式站金鑰實測重現、修正、GLM 審查
+> （批 3）、重新部署驗證。此份 REPORT 涵蓋全部三批。
 
 ## 做了什麼
 
@@ -35,6 +40,12 @@
 ### GLM 審查抓到的關鍵問題（已修）
 「下週三」原本會被 `WEEKDAY_RE` 誤判成「週三」，算出錯誤的 day 卻仍回報驗證通過——比不驗證更糟（讓使用者以為系統背書過的答案其實是錯的）。已修：正則加吃「下/下下」前綴，`expectedDayForWeekday` 加 `weekOffset` 參數正確位移 7/14 天。
 
+### 3. Hotfix：上線後 JX302「查詢服務暫時無法使用」（批 1 引入的迴歸）
+
+批 1、2 部署上線後，peanut 實測 JX302 回報 502「航班查詢服務暫時無法使用」——跟原本的 404「查無此航班」不同，代表打 API 本身出狀況。用正式站金鑰直接重現：`Departure` 角色回 204 後，緊接著打 `Arrival` 角色立即回 **429**「You have exceeded the rate limit per second for your plan, BASIC」。Root cause：批 1 新加的 fallback 邏輯讓兩次請求幾乎背靠背發生，撞上 RapidAPI BASIC 方案「1 req/s」的限速——這是我自己這輪引入的迴歸，先前只手動測過刻意加 `sleep` 的版本，沒測過真實無延遲的連續呼叫。
+
+修法：`queryByRole` 內部改成最多 2 次嘗試的迴圈，遇到 429 且是第一次嘗試時消耗掉回應 body、`sleep(1100)` 後重試一次。實測確認 429 回應不帶 `Retry-After` header（查過完整 header 清單），固定延遲是唯一可行做法；選在 `queryByRole` 底層而非 `lookupFlight` 呼叫端做固定 pre-sleep，是因為兩次查詢不一定會撞到限速窗口（實測時而 429、時而不會，取決於毫秒級時序）——反應式重試只在真的撞到時才付出等待成本。
+
 ## 改動檔案
 
 | 檔案 | 變更 |
@@ -58,6 +69,7 @@
 
 - 批 1（JX302）：⚠️ 2、💡 2、❓ 1；判真已修 1（Departure 路徑補對稱驗證）、可接受不修 1、風格不修 1。
 - 批 2（週幾/時段）：⚠️ 4、💡 2、❓ 3；判真已修 1（**「下週三」誤判為「週三」，本輪最重要的修正**）、可接受不修 2、已回答/不適用 3、已知範圍外限制 1（多個星期幾同時出現時只驗第一個，需要 schema 結構化標記才能做到，屬更大工程，peanut 未選用）。
+- 批 3（Hotfix：429 限速回歸）：⚠️ 3、💡 2、❓ 1；判真已修 2（消耗 429 body、註解改寫成純 WHY）、查證後維持設計 1（反應式重試優於 pre-sleep）、已回答 1（確認無 Retry-After header 可用）。
 
 ## Known issues / 已知限制（不阻擋，已記錄）
 
@@ -66,6 +78,8 @@
 3. **`extractWeekdaySignal` 只認第一個星期幾**：「週三去 A、週五去 B」這種多重星期幾，只有第一個會被結構化驗證，其餘靠 prompt 軟性引導。
 4. 兩個修正都建立在稍早那輪（`feat/three-fixes`）新增的 `lib/trip-days.ts` 機制之上，共用同一個重試迴圈與 correction 機制。
 
+5. **429 重試路徑沒有自動化測試**：專案沒有 fetch mock 慣例（既有慣例只測純函式），這條路徑靠這次上線後的實際故障 + 正式站金鑰手動重現來驗證，沒有回歸測試防護。若日後 `queryByRole` 再改動，建議手動用同樣手法（連續 curl 兩次同一 key）驗證限速路徑沒被破壞。
+
 ## 部署
 
-本輪改動未牽涉 secret/`apphosting.yaml`（不在禁動清單），typecheck/test/lint/build 全綠，可以直接 commit + push 部署。**依鐵律停止於此，等待 peanut 確認要不要現在部署。**
+批 1、2 已於 2026-07-11 部署一次；批 3（hotfix）修正後 typecheck/test(155)/lint/build 全綠，準備推送。**依鐵律停止於此，等待 peanut 確認要不要現在部署 hotfix。**

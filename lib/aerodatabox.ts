@@ -102,6 +102,10 @@ type RoleQueryResult =
   | { kind: "rows"; rows: AdbFlight[] }
   | { kind: "error"; message: string };
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function queryByRole(
   base: string,
   iata: string,
@@ -111,26 +115,41 @@ async function queryByRole(
   host: string,
 ): Promise<RoleQueryResult> {
   const url = `${base}/flights/number/${encodeURIComponent(iata)}/${date}?dateLocalRole=${role}`;
-  let res: Response;
-  try {
-    res = await fetch(url, { headers: { "x-rapidapi-key": key, "x-rapidapi-host": host } });
-  } catch (e) {
-    return { kind: "error", message: e instanceof Error ? e.message : String(e) };
+  const headers = { "x-rapidapi-key": key, "x-rapidapi-host": host };
+
+  // BASIC 方案限速 1 req/s；lookupFlight 的 Departure→Arrival fallback 兩次背靠背發生，
+  // 容易撞到同一秒的限速窗口。429 回應不帶 Retry-After（實測確認），只能用固定延遲；
+  // 反應式重試（撞到才等）比呼叫端固定 pre-sleep 好——多數情況兩次查詢根本不會撞窗口，
+  // 不該讓每次查詢都平白多等。
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(url, { headers });
+    } catch (e) {
+      return { kind: "error", message: e instanceof Error ? e.message : String(e) };
+    }
+    // AeroDataBox 查無該日班次回 204（無內容）或 404
+    if (res.status === 204 || res.status === 404) return { kind: "empty" };
+    if (res.status === 429 && attempt === 0) {
+      await res.text().catch(() => ""); // 消耗 body，避免未讀流殘留
+      await sleep(1100);
+      continue;
+    }
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      return { kind: "error", message: `AeroDataBox ${res.status}: ${t.slice(0, 200)}` };
+    }
+    let json: unknown;
+    try {
+      json = await res.json();
+    } catch {
+      return { kind: "error", message: "回應不是合法 JSON" };
+    }
+    if (!Array.isArray(json)) return { kind: "error", message: "回應格式非預期（不是陣列）" };
+    return { kind: "rows", rows: json as AdbFlight[] };
   }
-  // AeroDataBox 查無該日班次回 204（無內容）或 404
-  if (res.status === 204 || res.status === 404) return { kind: "empty" };
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    return { kind: "error", message: `AeroDataBox ${res.status}: ${t.slice(0, 200)}` };
-  }
-  let json: unknown;
-  try {
-    json = await res.json();
-  } catch {
-    return { kind: "error", message: "回應不是合法 JSON" };
-  }
-  if (!Array.isArray(json)) return { kind: "error", message: "回應格式非預期（不是陣列）" };
-  return { kind: "rows", rows: json as AdbFlight[] };
+  // for 迴圈兩輪內必有 return；此行只為 TS 完備性
+  return { kind: "error", message: "AeroDataBox 限速中，請稍後再試" };
 }
 
 export async function lookupFlight(
