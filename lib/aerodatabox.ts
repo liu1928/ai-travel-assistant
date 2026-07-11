@@ -22,7 +22,10 @@ export type FlightLookupError =
 // AeroDataBox FlightContract（只宣告會用到的欄位；回應是「陣列」——同號一日多班/多航段會多筆）
 type AdbAirport = { name?: string; iata?: string };
 type AdbTime = { utc?: string; local?: string }; // local 例："2026-07-25 08:05+08:00"
-type AdbMovement = { airport?: AdbAirport; scheduledTime?: AdbTime };
+// scheduledTime＝正式排班公告；predictedTime＝尚無正式排班、但已進入即時追蹤的推估值
+// （常見於「今天／快起飛」的航班）。兩者互斥出現，缺 scheduledTime 時要 fallback 到 predictedTime，
+// 否則這類航班會被 pickFlight 濾掉、誤判成查無資料（實測 JX302 案例，見 lib/__tests__/aerodatabox.test.ts）。
+type AdbMovement = { airport?: AdbAirport; scheduledTime?: AdbTime; predictedTime?: AdbTime };
 export type AdbFlight = {
   number?: string;
   airline?: { name?: string; iata?: string };
@@ -52,6 +55,15 @@ function airportLabel(a: AdbAirport | undefined): string {
     .trim();
 }
 
+// 一個 movement（出發或抵達）的時間：scheduledTime 優先，缺了才退 predictedTime；
+// 各自再 local 優先、缺了退 utc（utc 這層是既有行為，此時 HH:mm 非機場當地，極少見）。
+function endpointDateTime(m: AdbMovement | undefined): { date: string; hhmm: string } | undefined {
+  return (
+    splitLocalDateTime(m?.scheduledTime?.local ?? m?.scheduledTime?.utc) ??
+    splitLocalDateTime(m?.predictedTime?.local ?? m?.predictedTime?.utc)
+  );
+}
+
 /**
  * 從回傳列挑一筆可用航班組成結果（純函式，供單測）：
  * 缺起降機場或時刻的列剔除；多筆（同號一日多班、多航段）取排定出發最早者。
@@ -60,8 +72,8 @@ function airportLabel(a: AdbAirport | undefined): string {
 export function pickFlight(rows: AdbFlight[], flightNo: string): FlightLookupResult | undefined {
   const candidates = rows
     .map((row) => {
-      const dep = splitLocalDateTime(row.departure?.scheduledTime?.local ?? row.departure?.scheduledTime?.utc);
-      const arr = splitLocalDateTime(row.arrival?.scheduledTime?.local ?? row.arrival?.scheduledTime?.utc);
+      const dep = endpointDateTime(row.departure);
+      const arr = endpointDateTime(row.arrival);
       const from = airportLabel(row.departure?.airport);
       const to = airportLabel(row.arrival?.airport);
       if (!dep || !arr || !from || !to) return undefined;
@@ -85,6 +97,42 @@ export function pickFlight(rows: AdbFlight[], flightNo: string): FlightLookupRes
   };
 }
 
+type RoleQueryResult =
+  | { kind: "empty" } // 204/404：該 role 查無資料
+  | { kind: "rows"; rows: AdbFlight[] }
+  | { kind: "error"; message: string };
+
+async function queryByRole(
+  base: string,
+  iata: string,
+  date: string,
+  role: "Departure" | "Arrival",
+  key: string,
+  host: string,
+): Promise<RoleQueryResult> {
+  const url = `${base}/flights/number/${encodeURIComponent(iata)}/${date}?dateLocalRole=${role}`;
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: { "x-rapidapi-key": key, "x-rapidapi-host": host } });
+  } catch (e) {
+    return { kind: "error", message: e instanceof Error ? e.message : String(e) };
+  }
+  // AeroDataBox 查無該日班次回 204（無內容）或 404
+  if (res.status === 204 || res.status === 404) return { kind: "empty" };
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    return { kind: "error", message: `AeroDataBox ${res.status}: ${t.slice(0, 200)}` };
+  }
+  let json: unknown;
+  try {
+    json = await res.json();
+  } catch {
+    return { kind: "error", message: "回應不是合法 JSON" };
+  }
+  if (!Array.isArray(json)) return { kind: "error", message: "回應格式非預期（不是陣列）" };
+  return { kind: "rows", rows: json as AdbFlight[] };
+}
+
 export async function lookupFlight(
   flightNo: string,
   dateLocal?: string, // YYYY-MM-DD（出發地當地日期）；未填 → 以台灣時區今日近似「今天這班」
@@ -106,31 +154,27 @@ export async function lookupFlight(
   // 的班表（GLM REVIEW 2026-07-11 ⚠️-1）；使用者主要在台灣，前端也會提示補日期。
   const date = dateLocal ?? TAIPEI_DATE_FMT.format(new Date());
 
-  // dateLocalRole=Departure：date 一律當「出發日」解讀，紅眼班不會因抵達日吻合被撈進來
-  const url = `${base}/flights/number/${encodeURIComponent(iata)}/${date}?dateLocalRole=Departure`;
-
-  let res: Response;
-  try {
-    res = await fetch(url, { headers: { "x-rapidapi-key": key, "x-rapidapi-host": host } });
-  } catch (e) {
-    return err({ kind: "api_error", message: e instanceof Error ? e.message : String(e) });
-  }
-  // AeroDataBox 查無該日班次回 204（無內容）或 404
-  if (res.status === 204 || res.status === 404) return err({ kind: "not_found" });
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    return err({ kind: "api_error", message: `AeroDataBox ${res.status}: ${t.slice(0, 200)}` });
+  // dateLocalRole=Departure：date 一律當「出發日」解讀，紅眼班不會因抵達日吻合被撈進來。
+  // 主要查詢路徑：航班若已有正式排班（scheduledTime），Departure 角色一定查得到。
+  // 兩條路徑拿到結果後都驗證 dataDate === date 才採用（GLM REVIEW 2026-07-11 ❓-1）：
+  // Departure 角色通常已被 API 端過濾成該日期，但若某列缺 scheduledTime、退到 predictedTime
+  // （即時追蹤的延誤/提早推估值），算出的日期可能跟請求的 date 有落差，兩路徑統一驗證才對稱。
+  const primary = await queryByRole(base, iata, date, "Departure", key, host);
+  if (primary.kind === "error") return err({ kind: "api_error", message: primary.message });
+  if (primary.kind === "rows") {
+    const picked = pickFlight(primary.rows, iata);
+    if (!picked || picked.dataDate !== date) return err({ kind: "not_found" });
+    return ok(picked);
   }
 
-  let json: unknown;
-  try {
-    json = await res.json();
-  } catch {
-    return err({ kind: "api_error", message: "回應不是合法 JSON" });
-  }
-  if (!Array.isArray(json)) return err({ kind: "api_error", message: "回應格式非預期（不是陣列）" });
+  // Departure 角色查無資料：對「尚無正式排班、僅有即時追蹤 predictedTime」的航班，
+  // AeroDataBox 只有 Arrival 角色查得到（實測 JX302 案例：Departure 回 204、Arrival 回 200）。
+  // retry 一次；為避免紅眼班被抵達日吻合誤撈進來，取到結果後驗證其出發日期真的等於 date 才採用。
+  const fallback = await queryByRole(base, iata, date, "Arrival", key, host);
+  if (fallback.kind === "error") return err({ kind: "api_error", message: fallback.message });
+  if (fallback.kind === "empty") return err({ kind: "not_found" });
 
-  const picked = pickFlight(json as AdbFlight[], iata);
-  if (!picked) return err({ kind: "not_found" });
+  const picked = pickFlight(fallback.rows, iata);
+  if (!picked || picked.dataDate !== date) return err({ kind: "not_found" });
   return ok(picked);
 }

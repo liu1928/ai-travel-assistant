@@ -5,6 +5,44 @@
 
 ---
 
+## 2026-07-11（下半）：JX302 查無航班 / 行程對不上週幾與時段
+
+**背景**：緊接在同日「三項修正」（見下一節）之後，peanut 實測就回報兩個新問題——AeroDataBox
+換源後 JX302 查不到、以及那輪剛加的天數硬規則沒類推到「週幾」和「時段」。
+
+**JX302 root cause（實測 API 驗證，非猜測）**：AeroDataBox 對「今天已進即時追蹤但還沒正式
+排班」的航班，出發端只給 `predictedTime` 不給 `scheduledTime`；`dateLocalRole=Departure`
+在這種資料型態下查詢回 204，換 `dateLocalRole=Arrival` 查同一天同一航班立刻 200。程式原本
+①寫死 Departure 角色沒有 fallback、②`pickFlight` 只讀 scheduledTime 沒 fallback 到
+predictedTime，兩個疊加才變成「查無」。**教訓：換新資料源上線後，第一個真實世界的冷門案例
+（非熱門航線的即時追蹤航班）就踩到主流測試（BR198 對照組）測不出的資料型態分支**——這類
+「欄位存在與否互斥」的 API 行為，光看文件容易漏，要嘛多測幾種真實航班，要嘛程式面對「缺
+預期欄位」要有 fallback 而非直接濾掉。
+
+**週幾/時段 root cause**：跟同日稍早「生成缺天」是同一類問題（prompt 沒硬規則 + 沒生成後
+驗證），但多一層更根本的限制——沒有 `startDate` 錨點，「週三」在數學上算不出對應第幾天，
+這不是 prompt 沒寫好，是必要輸入缺失。跟 peanut 確認後選「前端擋下、要求先填日期」（而非
+靜默 fallback 猜測），實作沿用 `lib/trip-days.ts` 那套 inferMinDays/checkDayCoverage 的
+模式（新函式 extractWeekdaySignal/extractTimeOfDaySignal/expectedDayForWeekday/
+checkWeekdayTimeSignal），複用 generateTrip 既有的重試迴圈。
+
+**GLM 這輪最有價值的一條**：「下週三」原本被我的正則直接吃成「週三」，`expectedDayForWeekday`
+算出錯誤天數，但 `checkWeekdayTimeSignal` 照樣回報「驗證通過」——**這比完全不驗證更糟**，
+因為使用者會看到一個被系統背書過的錯誤答案。這正好打臉我自己寫在註解裡的原則（「沒有錨點
+就不驗，寧可不驗也不要用錯誤的猜測」）——原則對了，但沒把「下」這個修飾詞算進「有沒有可靠
+錨點」的判斷裡。**教訓：寫「沒把握就不驗」這類保守原則時，要盤點所有會產生「看似有把握、
+實則算錯」的輸入變體（相對日期修飾詞是最容易漏的一種），不能只擋「完全沒訊號」的情況。**
+
+**其他 GLM finding 判斷**：predictedTime 可能因即時追蹤延誤導致 dataDate 跟請求日期不符——
+GLM 指出這風險只存在於 Departure 路徑（因為我當時只在 Arrival fallback 路徑驗證
+`dataDate===date`），兩路徑標準不一致；順手補齊對稱驗證。「只認第一個星期幾」「時段用
+substring 誤判否定句」兩條記錄為已知限制不修——前者需要 schema 結構化標記（大工程，peanut
+沒選這個方案），後者最壞後果只是多一次 correction retry，不會產生「錯誤但顯示通過」的
+後果（跟「下週三」那條性質不同，這是判斷「要不要修」時的關鍵區分：會不會讓使用者對錯誤
+結果產生錯誤信心，比會不會誤觸發更值得優先修）。
+
+---
+
 ## 2026-07-11：三項修正（生成天數 / 編輯重排 / 航班換源 AeroDataBox）
 
 **任務來源**：peanut 回報三個使用問題 → 先做根因調查（每題一調查 agent＋一反方驗證 agent，

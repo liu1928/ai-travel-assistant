@@ -33,7 +33,10 @@ export async function POST(req: NextRequest) {
   if (!result.ok) {
     switch (result.error.kind) {
       case "not_found":
-        return NextResponse.json({ error: "查無此航班（該日期可能沒有班次）" }, { status: 404 });
+        return NextResponse.json(
+          { error: "查無此航班（該日期可能沒有班次，或資料源尚未收錄此航線排班——可改用下方欄位手動輸入）" },
+          { status: 404 },
+        );
       case "missing_key":
         return NextResponse.json({ error: "伺服器尚未設定 AeroDataBox 金鑰" }, { status: 500 });
       case "api_error":

@@ -1,68 +1,71 @@
-<!-- 產生日期: 2026-07-11 | 產生模型: claude-fable-5 | 引用 REVIEW.md 時間戳: 2026-07-11 13:55–14:12 (Asia/Taipei)，第 1 輪三批 + 第 2 輪 delta -->
+<!-- 產生日期: 2026-07-11 | 產生模型: claude-fable-5 | 引用 REVIEW.md 時間戳: 2026-07-11 18:15–18:33 (Asia/Taipei) -->
 
-# REPORT — 三項修正：生成天數完整性 / 編輯本地重排 / 航班換源 AeroDataBox
+# REPORT — 修正 JX302 查無航班 / 生成行程對不上週幾與時段
 
-> 依據 GLM 審查：`task/REVIEW.md`。PLAN：`task/PLAN.md`（peanut 2026-07-11 確認：問題一 a+b、問題二 durationMin 替代案＋兩個附帶修補、問題三換 AeroDataBox）。分支：`feat/three-fixes`（off main 73427e5d，未合併，等驗收）。
+> 依據 GLM 審查：`task/REVIEW.md`（本輪）。任務來源：peanut 回報「航班資訊查不到 JX302」「輸入週三早上去美麗海水族館，行程排出來不是在週三也不是在早上」。
+> 根因調查：獨立調查 + 反方驗證（含實打 AeroDataBox API），主張全數 confirmed，詳見對話紀錄。
+> 週幾無錨點的處理方式已與 peanut 確認：選「前端擋下、要求先填日期」。分支：`main`（已合併 feat/three-fixes 後的延續改動，尚未 commit/部署，等驗收）。
 
 ## 做了什麼
 
-1. **修正一（生成天數完整性）**：SYSTEM_PROMPT 加天數覆蓋硬規則＋輸出範例改雙日；buildUserMessage 天數改硬指令；新 `lib/trip-days.ts`——`inferMinDays`（沒填天數時從 prompt 抽「第N天/N天M夜/N日遊」推最低天數，含慣用語黑名單）＋`checkDayCoverage`（day 從 1 連續、指定→恰好、推斷→至少）；`generateTrip` 生成後驗證、不符帶修正指示自動重試 1 次、再不符回 refusal；schema `superRefine` 驗連續性；max_tokens 隨預期天數 8192–32000 動態調。
-2. **修正二（編輯本地重排，免 LLM）**：schema 加 `durationMin`（optional、上限 1440，舊資料免遷移）；新 `lib/trip-edit.ts`——進編輯模式對原始排程差分算「有效時長」（優先序：相鄰 time 差 → durationMin → 60 分）掛在項目上，刪除/排序後以「當天第一項原始時間」為錨點重推所有 time（所見即所得）；附帶修補：儲存時濾過期車程 insights、空天自動移除＋天數重編號（原本會 400 儲存失敗）。
-3. **修正三（航班換源）**：新 `lib/aerodatabox.ts` 取代 AviationStack（舊檔保留備查標 deprecated）——`GET /flights/number/{航班號}/{出發日}?dateLocalRole=Departure` 直查該日排定班表（免費層可查未來 365 天）；前端把該列日期一併送查、成功訊息標「YYYY-MM-DD 班表」、未填日期以台灣時區今日近似並提示；route 加收 date 驗格式。
+### 1. JX302 查無航班（兩個疊加的程式 bug + 一個資料源限制）
 
-### 與 PLAN 的兩個偏離（均有記錄理由）
-- **有效時長優先序**：PLAN 原寫 durationMin 優先，實作改為**差分優先**——刪中間項目時後項剛好提前「被刪項原佔時段」，且舊行程（無 durationMin）重排結果與原排程完全一致；durationMin 補末項與亂序的洞。見 lib/trip-edit.ts 註解。
-- **max_tokens 動態調整**：PLAN 修正一未列，但天數硬規則會逼出長輸出，不調會把長天數行程變假性 refusal，屬達成目標的必要配套。
+實測驗證的根因：
+- **bug①**：`lib/aerodatabox.ts` 原本把 `dateLocalRole` 寫死成 `Departure`。JX302 這班（今天已進入 AeroDataBox 即時追蹤、但尚無正式排班公告）出發端只回 `predictedTime`（推估值）不回 `scheduledTime`，導致 Departure 角色查詢回 204；換 `Arrival` 角色查同一天同一航班立刻拿到 200（有對照組 BR198 證明 API/金鑰本身正常）。
+- **bug②**：就算繞過①拿到 200，`pickFlight`／`AdbMovement` 型別只讀 `scheduledTime`，沒有 fallback 到 `predictedTime`，資料仍會被濾掉判成查無。
+- **資料源限制（無法修）**：查很遠的未來日期，AeroDataBox 對這條航線的出發時刻本身就是空的，只有快到日期才會補上——這部分只能改錯誤訊息引導手動輸入。
 
-## 改動檔案（17 檔，+852/−72；diff 見 task/diff.patch）
+修法：
+- `queryByRole` 抽成共用函式；`lookupFlight` 先查 `Departure`，204/404 時 retry 一次 `Arrival`。
+- `pickFlight`／`AdbMovement` 加 `predictedTime` fallback（`endpointDateTime` 輔助函式，scheduledTime 優先、缺了才退 predictedTime）。
+- **兩條查詢路徑都驗證 `picked.dataDate === date`** 才採用（GLM 審查抓到我原本只驗 Arrival fallback 沒驗 Departure，標準不一致，已補齊）——防止紅眼班因為日期吻合被誤撈進來。
+- `app/api/flight/lookup/route.ts` 的查無此航班訊息加一句「可能是資料源尚未收錄此航線排班，可改用下方欄位手動輸入」。
+
+### 2. 生成行程對不上使用者提到的週幾/時段
+
+根因比預期更根本：不只是 SYSTEM_PROMPT 沒寫規則（這部分也是真的），**更關鍵的是沒填「出發日期」時，系統送給 AI 的訊息完全沒有日期基準，AI 數學上無法算出「週三」對應第幾天**。時段（早上）則不需要錨點，是可以獨立強制的規則缺口。
+
+修法（沿用同一輪稍早「一句話生成只出特殊需求那一天」的機制模式）：
+- `lib/trip-days.ts` 新增 `extractWeekdaySignal`（抽「週三/星期三/禮拜三」，含「下週三/下下週三」修飾詞，回傳 `{weekday, weekOffset}`）、`extractTimeOfDaySignal`（抽早上/上午/中午/下午/晚上/凌晨/深夜）、`expectedDayForWeekday`（以 startDate 錨點換算對應第幾天）、`checkWeekdayTimeSignal`（驗證該天存在、且時段吻合）。
+- SYSTEM_PROMPT 加硬規則：明確星期幾/時段的要求優先於「④路線優化引擎」的排程美學建議（早→晚敘事節奏等），並定義七種時段的明確時間窗。
+- `buildUserMessage` 在有 `startDate` 時加換算指引：「day N 對應出發日 + (N-1) 天」。
+- `generateTrip` 生成後用 `checkWeekdayTimeSignal` 驗證，不符帶修正指示重試 1 次（複用既有重試迴圈）。
+- **前端 `app/trip/page.tsx`**：沒填出發日期但 prompt 含「週幾」字眼時直接擋下，要求先補日期（peanut 選定方案），不做靜默猜測。
+
+### GLM 審查抓到的關鍵問題（已修）
+「下週三」原本會被 `WEEKDAY_RE` 誤判成「週三」，算出錯誤的 day 卻仍回報驗證通過——比不驗證更糟（讓使用者以為系統背書過的答案其實是錯的）。已修：正則加吃「下/下下」前綴，`expectedDayForWeekday` 加 `weekOffset` 參數正確位移 7/14 天。
+
+## 改動檔案
 
 | 檔案 | 變更 |
 |---|---|
-| `lib/trip-days.ts`（新） | inferMinDays（含 IDIOM_RE 黑名單）+ checkDayCoverage |
-| `lib/trip-edit.ts`（新） | timeToMin/minToTime/effectiveDurations/attachDurations/reflowTimes/isRouteInsight |
-| `lib/aerodatabox.ts`（新） | lookupFlight(flightNo, dateLocal?) + splitLocalDateTime/pickFlight 純函式 |
-| `lib/anthropic.ts` | SYSTEM_PROMPT 天數規則＋durationMin；buildUserMessage 硬指令；generateTrip 重試迴圈＋動態 max_tokens |
-| `schema/trip.ts` | durationMin（int/positive/max 1440/optional）；days superRefine 連續性 |
-| `app/api/trip/generate/route.ts` | days sanitize（防浮點垃圾值）；車程文案耦合警示註解 |
-| `app/trips/[id]/page.tsx` | 編輯草稿掛時長＋錨點重排；儲存清洗（空天移除重編號、過期 insights 過濾、剝 UI 欄位）；提示文案 |
-| `app/trip/page.tsx` | 本地型別加 durationMin（pass-through） |
-| `app/api/flight/lookup/route.ts` | 換源 aerodatabox；收 date；錯誤文案更新 |
-| `components/bookings.tsx` | 查航班帶日期；身分守衛加日期；成功訊息標班表日期/未填提示 |
-| `lib/aviationstack.ts` | 檔頭標 deprecated（保留備查） |
-| `lib/quotas.ts` / `.env.example` | flight_lookup 註解；AERODATABOX_* 變數 |
-| `lib/__tests__/`（4 個新測試檔） | trip-days / trip-edit / trip-schema / aerodatabox |
-| `task/SPEC.md` | §3 加 durationMin 與 day 連續性；§4 記錄 prompt 修訂（解除「一字不改」，peanut 核准）與生成後防線 |
-| `specs/flight-lookup.md` | 標記 §0–§7 為歷史；新增 §8 換源 AeroDataBox（決策、實作差異、新限制） |
+| `lib/aerodatabox.ts` | `queryByRole` 共用函式；Departure→Arrival fallback；`predictedTime` fallback；兩路徑統一驗證 dataDate |
+| `app/api/flight/lookup/route.ts` | 查無此航班錯誤訊息補充說明 |
+| `lib/__tests__/aerodatabox.test.ts` | 新增 3 條：predictedTime fallback、優先序、都缺時剔除 |
+| `lib/trip-days.ts` | 新增 extractWeekdaySignal／extractTimeOfDaySignal／expectedDayForWeekday／checkWeekdayTimeSignal |
+| `lib/anthropic.ts` | SYSTEM_PROMPT 週幾/時段硬規則；buildUserMessage 換算指引；generateTrip 生成後驗證+重試 |
+| `app/trip/page.tsx` | 沒填日期卻提到週幾 → 前端擋下 |
+| `lib/__tests__/trip-days.test.ts` | 新增 22 條：週幾/時段/錨點換算/驗證函式（含下週三修正的 4 條） |
 
 ## 測試結果
 
-- `pnpm typecheck`：過（tsc --noEmit 無錯）
-- `pnpm test`：**14 files / 133 tests 全過**（新增 40 條：天數推斷/覆蓋 20、時間重排 13、schema 7、AeroDataBox 解析 9…含慣用語與上限回歸）
-- `pnpm lint`：過（0 errors 0 warnings）
-- `pnpm build`：過（Next.js 16.2.9 production build 成功）
+- `pnpm typecheck`：過
+- `pnpm test`：**14 files / 155 tests 全過**（本輪新增 25 條）
+- `pnpm lint`：過
+- `pnpm build`：過
 
-## GLM finding 統計（詳 task/REVIEW.md 仲裁表）
+## GLM finding 統計（詳 task/REVIEW.md）
 
-- 兩輪合計：🐛 2、⚠️ 13、💡 9、❓ 8。
-- **判真並修掉 8 條**：慣用語黑名單、max_tokens 上蓋 32000、durationMin 上限 1440、prompt 範例錨定、車程文案耦合註解、未填日期改 Asia/Taipei、formatter 模組常數、days sanitize。
-- **[FALSE POSITIVE] 2 條**：numFrom「三十」（regex 實際支援、有單測反證）、splitLocalDateTime "08:5"（`\d{2}` 不會匹配）。
-- **記錄不修 12 條**：P2 / 既有慣例 / 已核准取捨（各條理由見 REVIEW.md）。
+- 批 1（JX302）：⚠️ 2、💡 2、❓ 1；判真已修 1（Departure 路徑補對稱驗證）、可接受不修 1、風格不修 1。
+- 批 2（週幾/時段）：⚠️ 4、💡 2、❓ 3；判真已修 1（**「下週三」誤判為「週三」，本輪最重要的修正**）、可接受不修 2、已回答/不適用 3、已知範圍外限制 1（多個星期幾同時出現時只驗第一個，需要 schema 結構化標記才能做到，屬更大工程，peanut 未選用）。
 
-## Known issues / 需要 peanut 決定的事
+## Known issues / 已知限制（不阻擋，已記錄）
 
-1. **修正三上線前置（我不能動的部分）**：
-   - 請至 https://rapidapi.com/aedbx-aedbx/api/aerodatabox 註冊並訂閱 **BASIC（$0/月，需綁信用卡；600 units≈300 次查詢/月，hard limit 超額只擋請求不扣款）**，把 `X-RapidAPI-Key` 給我或自行放入 Secret Manager（secret 名 `AERODATABOX_API_KEY`）。
-   - `apphosting.yaml` 需要的 diff（**等你確認我再改**，改完要重部署才生效）：
-     ```yaml
-     # env 區塊新增（AVIATIONSTACK_* 兩筆保留不動）：
-       - variable: AERODATABOX_API_KEY
-         secret: AERODATABOX_API_KEY
-     ```
-     （`AERODATABOX_BASE_URL` 用程式預設 `https://aerodatabox.p.rapidapi.com`，不必進 yaml。）
-   - 拿到 key 後建議先實測 BR/CI/JX/IT 各一班 2 週後航班，比對航司官網時刻（台灣 schedules 覆蓋 94%，台虎為 LCC 建議驗證班表深度）。
-2. **本機 `.env.local`**：請自行加 `AERODATABOX_API_KEY=<key>`（我不動 .env.local）。
-3. **未合併**：改動都在 `feat/three-fixes`，驗收後再merge 到 main（會觸發 App Hosting 部署——修正三在 key 設好前，查航班會回「伺服器尚未設定 AeroDataBox 金鑰」，修正一/二不受影響）。
-4. **殘留已知限制**（已記錄、不阻擋）：AeroDataBox 換季班表最慢約 2 週反映；未填日期以台灣時區近似今日；重排 clamp 在 23:59；superRefine 會擋 Firestore 手改出來的不連續 day 文件（編輯儲存會自我修復）。
-5. **人工實測基準（部署後）**：①「第三天要去迪士尼的五天東京行」→ 5 天完整行程且第 3 天含迪士尼；②刪掉行程中午項目 → 下午時間自動提前、舊車程 insights 消失；③查 2 週後 BR198 → 帶入時刻與長榮官網一致、訊息標示班表日期。
+1. **AeroDataBox 對遠期未來日期無出發時刻資料**：屬資料源限制，非程式問題，已用錯誤訊息引導使用者改手動輸入。
+2. **`extractTimeOfDaySignal` 是子字串匹配**：「不要早上」這種否定語句會被誤判成有時段要求，最壞後果是多一次重試，不會產生錯誤但顯示為「已驗證通過」的結果。
+3. **`extractWeekdaySignal` 只認第一個星期幾**：「週三去 A、週五去 B」這種多重星期幾，只有第一個會被結構化驗證，其餘靠 prompt 軟性引導。
+4. 兩個修正都建立在稍早那輪（`feat/three-fixes`）新增的 `lib/trip-days.ts` 機制之上，共用同一個重試迴圈與 correction 機制。
 
-**依鐵律停止於此，等待 peanut 驗收。**
+## 部署
+
+本輪改動未牽涉 secret/`apphosting.yaml`（不在禁動清單），typecheck/test/lint/build 全綠，可以直接 commit + push 部署。**依鐵律停止於此，等待 peanut 確認要不要現在部署。**

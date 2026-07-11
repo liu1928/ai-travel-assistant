@@ -15,6 +15,7 @@ import {
   type CarRentalDraft,
   type LodgingDraft,
 } from "@/components/bookings";
+import { extractWeekdaySignal } from "@/lib/trip-days";
 
 type TripStyle = "relax" | "food" | "nature" | "city";
 type TravelMode = "DRIVE" | "WALK" | "TRANSIT";
@@ -131,6 +132,12 @@ function TripGenerateInner() {
   async function handleGenerate() {
     if (!prompt.trim() && selectedIds.size === 0) {
       setGen({ status: "error", message: "請至少輸入一句話，或勾選幾個收藏地點" });
+      return;
+    }
+    // 提到「週三」這類星期幾卻沒填出發日期 → 系統無從換算對應第幾天，擋下請求引導補填
+    // （而不是靜默生成一個可能猜錯週的結果）。見 task/MEMORY.md 2026-07-11 節。
+    if (!startDate && extractWeekdaySignal(prompt) !== undefined) {
+      setGen({ status: "error", message: "偵測到你提到「週幾」，請先填「出發日期」欄位，系統才能算出正確的天數" });
       return;
     }
     const bookings = draftsToBookings(flightDrafts, rentalDrafts, lodgingDrafts);

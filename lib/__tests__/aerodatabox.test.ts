@@ -93,4 +93,35 @@ describe("pickFlight", () => {
     });
     expect(pickFlight([noName], "BR198")?.from).toBe("TPE");
   });
+
+  it("缺 scheduledTime 時退用 predictedTime（尚無正式排班、僅即時追蹤的航班，實測 JX302 案例）", () => {
+    const predictedOnly = row({
+      departure: {
+        airport: { name: "Taichung", iata: "RMQ" },
+        predictedTime: { utc: "2026-07-11 04:29Z", local: "2026-07-11 12:29+08:00" },
+      },
+    });
+    const r = pickFlight([predictedOnly], "JX302");
+    expect(r?.departTime).toBe("12:29");
+    expect(r?.dataDate).toBe("2026-07-11");
+    expect(r?.from).toContain("RMQ");
+  });
+
+  it("scheduledTime 與 predictedTime 都有時，scheduledTime 優先", () => {
+    const both = row({
+      departure: {
+        airport: { name: "Taipei", iata: "TPE" },
+        scheduledTime: { local: "2026-07-25 08:05+08:00" },
+        predictedTime: { local: "2026-07-25 08:20+08:00" },
+      },
+    });
+    expect(pickFlight([both], "BR198")?.departTime).toBe("08:05");
+  });
+
+  it("scheduledTime 與 predictedTime 都缺（僅機場名，實測遠期未來日期案例）→ 該列被剔除", () => {
+    const bothMissing = row({
+      departure: { airport: { name: "Taychzhun" } },
+    });
+    expect(pickFlight([bothMissing], "JX302")).toBeUndefined();
+  });
 });

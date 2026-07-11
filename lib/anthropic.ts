@@ -6,7 +6,14 @@ import type { SavedPlace } from "@/schema/place";
 import type { TravelDna } from "./travel-dna"; // type-only：無 runtime 循環依賴
 import { ok, err, type Result } from "./result";
 import { envOr } from "./env";
-import { inferMinDays, checkDayCoverage } from "./trip-days";
+import {
+  inferMinDays,
+  checkDayCoverage,
+  extractWeekdaySignal,
+  extractTimeOfDaySignal,
+  expectedDayForWeekday,
+  checkWeekdayTimeSignal,
+} from "./trip-days";
 
 const MODEL = envOr("ANTHROPIC_MODEL", "claude-sonnet-4-6");
 
@@ -183,7 +190,11 @@ Atlas AI 分三個階段：
 - days 必須從 day 1 開始、連續編號（1, 2, 3…），涵蓋整趟旅行的每一天，每天都要有完整 schedule。
 - 使用者提到「第 N 天」的需求時，總天數至少為 N：該需求排進第 N 天，其他每一天也要完整規劃，不可只輸出被提到的那一天。
 - 限制條件有指定天數時，days 的元素數量必須恰好等於指定天數。
-- durationMin 是該項目預計佔用的分鐘數（正整數，視活動而定，例：交通 30、景點 90、用餐 60；上限 1440），每個項目都要填，不要一律填同一個數字。`;
+- durationMin 是該項目預計佔用的分鐘數（正整數，視活動而定，例：交通 30、景點 90、用餐 60；上限 1440），每個項目都要填，不要一律填同一個數字。
+
+重要：時間/星期精準度規則（必須全部遵守，優先於④路線優化引擎的排程美學建議）：
+- 使用者若提到明確星期幾（週一~週日／星期幾／禮拜幾），且訊息裡有給出發日期與換算方式，該行程必須依換算結果排進正確的 day，不可為了排程順暢而挪到別天。
+- 使用者若提到明確時段（凌晨／早上／上午／中午／下午／晚上／深夜），該行程的 time 必須落在對應時間窗：早上／上午 06:00–11:59、中午 11:00–13:00、下午 12:00–17:59、晚上 18:00–21:59、深夜 22:00–23:59、凌晨 00:00–05:59；不可為了「早→晚敘事節奏」把使用者指定時段的行程挪到別的時段。`;
 
 export type HolidayInfo = { date: string; name: string };
 
@@ -235,7 +246,9 @@ export function buildUserMessage(input: GenerateTripInput): string {
   if (input.startDate) {
     const d = new Date(`${input.startDate}T00:00:00`);
     const weekday = Number.isNaN(d.getTime()) ? "" : `（週${WEEKDAY_LABEL[d.getDay()]}）`;
-    constraints.push(`出發日期：${input.startDate}${weekday}`);
+    constraints.push(
+      `出發日期：${input.startDate}${weekday}；day N 對應出發日 + (N-1) 天，請據此換算使用者提到的星期幾（如「週三」）對應第幾天`,
+    );
   }
   // 天數是最常被忽略的約束（AI 會鎖定 prompt 裡的「第 N 天」只出那一天），
   // 有指定 → 硬指令；沒指定 → 從 prompt 推斷最低天數（generateTrip 生成後會照同一標準驗證）
@@ -399,6 +412,15 @@ export async function generateTrip(
   const exactDays = input.days;
   const minDays = exactDays ? undefined : inferMinDays(input.prompt ?? "");
   const expectedDays = exactDays ?? minDays;
+
+  // 星期幾/時段完整性標準：只有「提到星期幾 + 有 startDate 錨點」才算得出 expectedDay，
+  // 沒有錨點就不驗（前端已擋下「沒填出發日期卻提到星期幾」的請求，這裡是防禦性 fallback）。
+  const weekdaySignal = input.prompt ? extractWeekdaySignal(input.prompt) : undefined;
+  const timeSignal = input.prompt ? extractTimeOfDaySignal(input.prompt) : undefined;
+  const expectedDay =
+    weekdaySignal !== undefined && input.startDate
+      ? expectedDayForWeekday(input.startDate, weekdaySignal.weekday, weekdaySignal.weekOffset)
+      : undefined;
   // 8192 基準：分身模式讓每個 stop 多一句「為你而選」理由 + 每天一個探索點（GLM REVIEW ⚠️-2）。
   // 天數硬規則會逼出長天數輸出，輸出量隨天數線性成長 → 動態上調，避免被截斷變假性 refusal。
   const maxTokens = expectedDays ? Math.min(32000, Math.max(8192, expectedDays * 2000 + 2000)) : 8192;
@@ -436,6 +458,15 @@ export async function generateTrip(
           continue;
         }
         return err({ kind: "refusal", stopReason: `day_coverage: ${coverage.reason}` });
+      }
+
+      const weekdayCheck = checkWeekdayTimeSignal(message.parsed_output.days, { expectedDay, timeKeyword: timeSignal });
+      if (!weekdayCheck.ok) {
+        if (attempt === 0) {
+          correction = `⚠️ 你上一次的輸出沒有遵守使用者指定的星期幾/時段：${weekdayCheck.reason}。請重新輸出完整 JSON，把該行程排在正確的 day 與時間窗內。`;
+          continue;
+        }
+        return err({ kind: "refusal", stopReason: `weekday_time: ${weekdayCheck.reason}` });
       }
 
       return ok(message.parsed_output);

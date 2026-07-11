@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { inferMinDays, checkDayCoverage } from "@/lib/trip-days";
+import {
+  inferMinDays,
+  checkDayCoverage,
+  extractWeekdaySignal,
+  extractTimeOfDaySignal,
+  expectedDayForWeekday,
+  checkWeekdayTimeSignal,
+} from "@/lib/trip-days";
 
 /**
  * 修正「一句話生成只出特殊需求那一天」的兩個純函式：
@@ -97,5 +104,116 @@ describe("checkDayCoverage — days 覆蓋完整性", () => {
     expect(checkDayCoverage([1], { minDays: 3 }).ok).toBe(false);
     expect(checkDayCoverage([1, 2, 3], { minDays: 3 }).ok).toBe(true);
     expect(checkDayCoverage([1, 2, 3, 4], { minDays: 3 }).ok).toBe(true);
+  });
+});
+
+describe("extractWeekdaySignal — 抽「週幾」訊號", () => {
+  it("「週三」「星期三」「禮拜三」都能抽到 weekday=3、weekOffset=0", () => {
+    expect(extractWeekdaySignal("週三早上去美麗海水族館")).toEqual({ weekday: 3, weekOffset: 0 });
+    expect(extractWeekdaySignal("星期三早上去美麗海水族館")).toEqual({ weekday: 3, weekOffset: 0 });
+    expect(extractWeekdaySignal("禮拜三早上去美麗海水族館")).toEqual({ weekday: 3, weekOffset: 0 });
+  });
+
+  it("週日/週天都對應 weekday=0（JS Date.getDay 慣例）", () => {
+    expect(extractWeekdaySignal("週日去海邊")).toEqual({ weekday: 0, weekOffset: 0 });
+    expect(extractWeekdaySignal("禮拜天去海邊")).toEqual({ weekday: 0, weekOffset: 0 });
+  });
+
+  it("「下週三」「下星期三」「下禮拜三」都能抽到 weekOffset=1（GLM REVIEW 2026-07-11 🐛-1 修正）", () => {
+    expect(extractWeekdaySignal("下週三去美麗海水族館")).toEqual({ weekday: 3, weekOffset: 1 });
+    expect(extractWeekdaySignal("下星期三去美麗海水族館")).toEqual({ weekday: 3, weekOffset: 1 });
+    expect(extractWeekdaySignal("下禮拜三去美麗海水族館")).toEqual({ weekday: 3, weekOffset: 1 });
+  });
+
+  it("「下下週三」→ weekOffset=2", () => {
+    expect(extractWeekdaySignal("下下週三去美麗海水族館")).toEqual({ weekday: 3, weekOffset: 2 });
+  });
+
+  it("沒有星期幾訊號 → undefined", () => {
+    expect(extractWeekdaySignal("週末想去台中放鬆")).toBeUndefined();
+    expect(extractWeekdaySignal("五天四夜東京行")).toBeUndefined();
+  });
+});
+
+describe("extractTimeOfDaySignal — 抽時段訊號", () => {
+  it("抓得到七種時段關鍵字", () => {
+    expect(extractTimeOfDaySignal("早上去水族館")).toBe("早上");
+    expect(extractTimeOfDaySignal("下午茶")).toBe("下午");
+    expect(extractTimeOfDaySignal("凌晨出發")).toBe("凌晨");
+  });
+
+  it("沒有時段訊號 → undefined", () => {
+    expect(extractTimeOfDaySignal("週三去美麗海水族館")).toBeUndefined();
+  });
+});
+
+describe("expectedDayForWeekday — 錨點換算對應第幾天", () => {
+  it("startDate 當天就是目標星期幾 → day 1", () => {
+    // 2026-07-13 是週一
+    expect(expectedDayForWeekday("2026-07-13", 1)).toBe(1);
+  });
+
+  it("目標星期幾在 startDate 之後 → 對應天數", () => {
+    // 2026-07-13（週一）之後的第一個週三 → day 3
+    expect(expectedDayForWeekday("2026-07-13", 3)).toBe(3);
+  });
+
+  it("目標星期幾比 startDate 早（跨週）→ 折回下一輪", () => {
+    // 2026-07-15（週三）之後的第一個週一 → day 6
+    expect(expectedDayForWeekday("2026-07-15", 1)).toBe(6);
+  });
+
+  it("startDate 格式不合 → undefined", () => {
+    expect(expectedDayForWeekday("not-a-date", 3)).toBeUndefined();
+  });
+
+  it("weekOffset=1（下週）在算出的 day 上再加 7", () => {
+    // 2026-07-13（週一）之後的第一個週三是 day 3；「下週三」要再 +7 = day 10
+    expect(expectedDayForWeekday("2026-07-13", 3, 1)).toBe(10);
+  });
+
+  it("weekOffset=2（下下週）再加 14", () => {
+    expect(expectedDayForWeekday("2026-07-13", 3, 2)).toBe(17);
+  });
+
+  it("weekOffset 省略時等同 0（回歸不破）", () => {
+    expect(expectedDayForWeekday("2026-07-13", 3)).toBe(expectedDayForWeekday("2026-07-13", 3, 0));
+  });
+});
+
+describe("checkWeekdayTimeSignal — 驗證星期幾/時段是否被遵守", () => {
+  const days = (schedules: string[][]) =>
+    schedules.map((times, i) => ({
+      day: i + 1,
+      schedule: times.map((time) => ({ time })),
+    }));
+
+  it("expectedDay 為 undefined（沒提到星期幾或沒錨點）→ 直接放行", () => {
+    expect(checkWeekdayTimeSignal(days([["09:00"]]), {}).ok).toBe(true);
+  });
+
+  it("expectedDay 對應的天不存在（行程太短）→ fail", () => {
+    const r = checkWeekdayTimeSignal(days([["09:00"], ["09:00"]]), { expectedDay: 3 });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("只有 2 天");
+  });
+
+  it("只驗星期幾（無 timeKeyword）：day 存在即通過，不管時段", () => {
+    expect(checkWeekdayTimeSignal(days([["09:00"], ["23:00"]]), { expectedDay: 2 }).ok).toBe(true);
+  });
+
+  it("有 timeKeyword：目標天有落在時間窗內的行程 → ok", () => {
+    const r = checkWeekdayTimeSignal(days([["09:00"], ["08:00", "14:00"]]), {
+      expectedDay: 2,
+      timeKeyword: "早上",
+    });
+    expect(r.ok).toBe(true);
+  });
+
+  it("有 timeKeyword：目標天沒有行程落在時間窗內 → fail", () => {
+    const r = days([["09:00"], ["14:00", "20:00"]]);
+    const result = checkWeekdayTimeSignal(r, { expectedDay: 2, timeKeyword: "早上" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("早上");
   });
 });
