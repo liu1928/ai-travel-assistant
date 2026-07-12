@@ -182,13 +182,16 @@ export async function lookupFlight(
   if (primary.kind === "error") return err({ kind: "api_error", message: primary.message });
   if (primary.kind === "rows") {
     const picked = pickFlight(primary.rows, iata);
-    if (!picked || picked.dataDate !== date) return err({ kind: "not_found" });
-    return ok(picked);
+    // 有可用結果且日期吻合 → 直接回傳
+    if (picked && picked.dataDate === date) return ok(picked);
+    // Departure 回傳 rows 但取不到時刻（如遠期班表只有機場名）→ 繼續 fallback Arrival，
+    // 不在此提早 not_found（JX302 未來日期案例：Departure 有機場資料但無時刻）。
   }
 
-  // Departure 角色查無資料：對「尚無正式排班、僅有即時追蹤 predictedTime」的航班，
-  // AeroDataBox 只有 Arrival 角色查得到（實測 JX302 案例：Departure 回 204、Arrival 回 200）。
-  // retry 一次；為避免紅眼班被抵達日吻合誤撈進來，取到結果後驗證其出發日期真的等於 date 才採用。
+  // Departure 查無資料（204/404）或取不到可用時刻 → 試 Arrival 角色：
+  // 對「尚無正式排班、僅有即時追蹤 predictedTime」的航班，Arrival 角色查得到；
+  // 對遠期班表只有機場名的 rows，Arrival 角色可能帶有 scheduledTime（實測 JX302 未來日期）。
+  // 為避免紅眼班被抵達日吻合誤撈進來，取到結果後驗證出發日期真的等於 date 才採用。
   const fallback = await queryByRole(base, iata, date, "Arrival", key, host);
   if (fallback.kind === "error") return err({ kind: "api_error", message: fallback.message });
   if (fallback.kind === "empty") return err({ kind: "not_found" });

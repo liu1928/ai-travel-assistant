@@ -135,3 +135,37 @@
 - 批 2（週幾/時段）：⚠️ 4（含重複描述同一問題）、💡 2、❓ 3；判真已修 1（「下週三」誤算，本輪最重要的修正）、可接受不修 2、已回答/不適用 3、已知範圍外限制 1。
 - 批 3（Hotfix：429 限速回歸）：⚠️ 3、💡 2、❓ 1；判真已修 2（消耗 body、註解改寫）、查證後維持設計 1、已回答 1。
 - 修正後驗證：`pnpm typecheck && pnpm test && pnpm lint && pnpm build` 全綠（14 files / 155 tests，含本輪新增 22 條）。
+
+---
+
+## 批 4（2026-07-12 JX302 未來日期查不到：lookupFlight fallback 邏輯修正）
+
+> 時間戳：2026-07-12 20:27（Asia/Taipei）  
+> 審查範圍：`lib/aerodatabox.ts` lookupFlight 4 行改動  
+> Bug：Departure 返回 rows 但 pickFlight 取不到時刻時，舊程式直接回 not_found 不試 Arrival
+
+### 🐛 問題點
+無。修改邏輯正確，成功消除了提早 `return not_found` 導致無法觸發 Arrival fallback 的缺陷。
+
+### ⚠️ 風險
+
+1. **API 呼叫次數增加**：當 `primary.kind === "rows"` 但 `pickFlight` 失敗時，現在必定會多打一次 Arrival API，可能觸發 Rate Limit 或增加延遲。
+
+2. **Arrival fallback 的 `dataDate` 保護**：防紅眼班的 `dataDate === date` 驗證高度依賴 `pickFlight` 正確提取 `dataDate`。若缺出發時間可能誤判。
+
+### ❓ 待釐清問題
+
+1. `pickFlight` 對「只有機場名、無時刻」的 rows 回傳 `undefined` 還是 `dataDate` 不符的物件？
+2. Arrival fallback 下方（diff 未展示）是否有 `dataDate !== date` 的防護？
+
+### ✅ 批 4 仲裁
+
+| # | 判定 | 處置 |
+|---|---|---|
+| ⚠️-1 API 呼叫次數增加 | 可接受，不修 | 「只有機場名無時刻」僅在 JX302 類特定航班＋遠期日期才發生；一般航班 Departure 有 scheduledTime 直接回傳，不多一次 call。429 retry 已在 queryByRole 內處理。 |
+| ⚠️-2 dataDate 保護 | [FALSE POSITIVE] | Arrival fallback 的 `dataDate` 保護早已存在（`lib/aerodatabox.ts:196-197`）：`if (!picked \|\| picked.dataDate !== date) return err({ kind: "not_found" })`。 |
+| ❓-1 pickFlight 回傳什麼 | [ANSWERED] | 回傳 `undefined`——有單測驗證（`lib/__tests__/aerodatabox.test.ts:121-126`）。`if (picked && picked.dataDate === date)` 判斷精準。 |
+| ❓-2 Arrival fallback 有無 dataDate 保護 | [ANSWERED] | 有，見 ⚠️-2 仲裁。 |
+
+- 本批統計：0 條真實 finding，1 條 [FALSE POSITIVE]，2 條 [ANSWERED]，不修 1。
+- 驗證：`pnpm typecheck` 通過，`pnpm test` 155 tests 全通過。
