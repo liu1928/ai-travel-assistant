@@ -90,3 +90,18 @@ Routes insights 只在生成時寫入、編輯後殘留（generate/route.ts:173-
 GLM review（分三批：修正一/二/三）→ REVIEW.md 仲裁 → REPORT.md。
 人工實測基準：①「第三天要去迪士尼的五天東京行」→ 應生成 5 天完整行程且第 3 天含迪士尼；
 ②刪掉既有行程中午項目 → 下午項目時間自動提前；③查 BR/CI/JX/IT 各一班 2 週後航班 → 帶入時間與航司官網一致。
+
+---
+
+## 2026-07-16 hotfix：單一地點分享連結解析失敗
+
+**症狀**：使用者貼 `maps.app.goo.gl/X3zDsKifeHWBQC9s7`（單一地點）被誤報「僅支援單一地點連結」。
+
+**根因（已實測）**：該短連結展開後為新版格式
+`/maps/place/<名稱+完整地址>/data=!4m2!3m1!1s0x...:0x...`——**無 `!3d!4d` 座標、無 `@lat,lng`**，只有 hex CID。`extractNameAndCoords()` 硬性要求座標 → 回 null → 落入 fallback 錯誤（訊息誤導）。
+
+**修法**：名稱段本身含完整地址，直接 Text Search 即可精準命中。
+1. `lib/sharelink.ts`：座標改 optional——抓到名稱但無座標時，`places:searchText` 不帶 `locationBias` 直接查。
+2. `lib/__tests__/sharelink.test.ts`：export 解析函式並補測試（含本次實測 URL 形態）。
+
+範圍：2 檔。驗證：pnpm test / typecheck / lint → GLM review → REVIEW/REPORT。

@@ -169,3 +169,24 @@
 
 - 本批統計：0 條真實 finding，1 條 [FALSE POSITIVE]，2 條 [ANSWERED]，不修 1。
 - 驗證：`pnpm typecheck` 通過，`pnpm test` 155 tests 全通過。
+
+---
+
+# GLM 審查 2026-07-16：單一地點分享連結解析修復（sharelink 座標 optional）
+
+審查範圍：`lib/sharelink.ts`（extractNameAndCoords 座標改 optional、searchByNameAndCoords 條件化 locationBias）+ `lib/__tests__/sharelink.test.ts`（新增 4 測試）。focus：correctness、回歸風險。
+
+## GLM 發現與仲裁
+
+- 🐛1「無座標時 location fallback (0,0) 是資料污染」——**P2 記錄不修**。SEARCH_FIELD_MASK 明確要求 `places.location`，API 正常回應必帶座標（本日真實 API 呼叫證實）；且 `(0,0)` fallback 與既有 `fetchPlaceById` 的 `?? 0` 慣例一致，非本次引入。若未來要收緊，應同時改兩處與 PlaceSearchResult 型別，不在本 hotfix 範圍。
+- 🐛2「parseShareLink 對 null 缺防禦會 TypeError」——**[FALSE POSITIVE]**。完整程式碼是 `const nameCoords = extractNameAndCoords(finalUrl); if (nameCoords) { ... }`，null 已被擋；GLM 只看 diff 節錄。
+- ⚠️1「無座標純文字查詢可能命中遠處同名店」——**已以真實 API 端對端驗證**：實際案例 URL 的名稱段（含完整地址＋郵遞區號＋國名）`textQuery` 無 bias 精準命中正確地點（ChIJcep34MxZ5DQR5VjNV0a8HWg，沖繩古宇利島）。此路徑僅在連結本身無座標時走，而該類連結名稱段必含地址；有座標路徑完全未變（回歸安全）。接受。
+- ⚠️2「200m 硬編碼半徑」——既有邏輯，非本次範圍，記錄備查。
+- ⚠️3「regex 對未來 URL 格式脆弱」——既有結構性限制；本次已為 2026-07 新格式補測試釘住行為，未來格式再變時測試會先失敗。
+- ❓2「是否真機驗證」——**已做**：真實 Places API searchText 呼叫成功命中（見 ⚠️1）。
+
+## 驗證
+
+vitest **159/159**（含新增 4 測試）✅、`tsc --noEmit` ✅、eslint ✅、真實 API 端對端 ✅。
+
+統計：真 P0/P1 0 條、P2 記錄 1 條、假 1 條、既有範圍外 2 條。

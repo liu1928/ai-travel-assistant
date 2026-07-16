@@ -72,10 +72,13 @@ function extractPlaceId(url: string): string | null {
 }
 
 // 新格式：Google 現在多半用十六進位 CID pair（!1s0x...:0x...），不再是 ChIJ。
-// 改用「地點名稱 + 精確座標」做 Text Search 座標偏向搜尋，跟 Takeout 匯入同一套邏輯。
-function extractNameAndCoords(
+// 改用「地點名稱 + 座標（若有）」做 Text Search，跟 Takeout 匯入同一套邏輯。
+// 2026-07 起手機分享連結展開後常「只有名稱＋地址、完全沒有座標」
+// （無 !3d!4d 也無 @lat,lng）——但名稱段本身含完整地址，直接全文搜尋即可命中，
+// 所以座標是 optional：有就做 200m 偏向、沒有就純文字查。
+export function extractNameAndCoords(
   url: string,
-): { name: string; lat: number; lng: number } | null {
+): { name: string; coords: { lat: number; lng: number } | null } | null {
   const nameMatch = url.match(/\/maps\/place\/([^/]+)\//);
   if (!nameMatch) return null;
   const name = decodeURIComponent(nameMatch[1].replace(/\+/g, " "));
@@ -83,16 +86,23 @@ function extractNameAndCoords(
   // 優先用 !3d<lat>!4d<lng>（精確標記座標）
   const preciseMatch = url.match(/!3d(-?[0-9.]+)!4d(-?[0-9.]+)/);
   if (preciseMatch) {
-    return { name, lat: parseFloat(preciseMatch[1]), lng: parseFloat(preciseMatch[2]) };
+    return {
+      name,
+      coords: { lat: parseFloat(preciseMatch[1]), lng: parseFloat(preciseMatch[2]) },
+    };
   }
 
   // 退而求其次用 @lat,lng,zoom（地圖中心，通常也很接近）
   const atMatch = url.match(/@(-?[0-9.]+),(-?[0-9.]+),/);
   if (atMatch) {
-    return { name, lat: parseFloat(atMatch[1]), lng: parseFloat(atMatch[2]) };
+    return {
+      name,
+      coords: { lat: parseFloat(atMatch[1]), lng: parseFloat(atMatch[2]) },
+    };
   }
 
-  return null;
+  // 無座標：名稱（含地址）仍可用 Text Search 解析
+  return { name, coords: null };
 }
 
 async function fetchPlaceById(
@@ -128,8 +138,7 @@ async function fetchPlaceById(
 
 async function searchByNameAndCoords(
   name: string,
-  lat: number,
-  lng: number,
+  coords: { lat: number; lng: number } | null,
   apiKey: string,
 ): Promise<PlaceSearchResult | null> {
   try {
@@ -144,9 +153,17 @@ async function searchByNameAndCoords(
         textQuery: name,
         languageCode: "zh-TW",
         maxResultCount: 1,
-        locationBias: {
-          circle: { center: { latitude: lat, longitude: lng }, radius: 200 },
-        },
+        // 座標可信時做 200m 偏向；新版無座標連結靠名稱內含的完整地址命中
+        ...(coords
+          ? {
+              locationBias: {
+                circle: {
+                  center: { latitude: coords.lat, longitude: coords.lng },
+                  radius: 200,
+                },
+              },
+            }
+          : {}),
       }),
     });
     if (!res.ok) return null;
@@ -166,7 +183,10 @@ async function searchByNameAndCoords(
       placeId: p.id,
       name: p.displayName?.text ?? name,
       address: p.formattedAddress,
-      location: { lat: p.location?.latitude ?? lat, lng: p.location?.longitude ?? lng },
+      location: {
+        lat: p.location?.latitude ?? coords?.lat ?? 0,
+        lng: p.location?.longitude ?? coords?.lng ?? 0,
+      },
       googleTypes: p.types ?? [],
       rating: p.rating,
     };
@@ -215,10 +235,10 @@ export async function parseShareLink(
     if (place) return ok({ kind: "place", places: [place] });
   }
 
-  // 新格式：名稱 + 座標 → Text Search 解析
+  // 新格式：名稱（＋座標，若有）→ Text Search 解析
   const nameCoords = extractNameAndCoords(finalUrl);
   if (nameCoords) {
-    const place = await searchByNameAndCoords(nameCoords.name, nameCoords.lat, nameCoords.lng, apiKey);
+    const place = await searchByNameAndCoords(nameCoords.name, nameCoords.coords, apiKey);
     if (place) return ok({ kind: "place", places: [place] });
   }
 

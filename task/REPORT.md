@@ -83,3 +83,36 @@
 ## 部署
 
 批 1、2 已於 2026-07-11 部署一次；批 3（hotfix）修正後 typecheck/test(155)/lint/build 全綠，準備推送。**依鐵律停止於此，等待 peanut 確認要不要現在部署 hotfix。**
+
+---
+
+# REPORT 2026-07-16：單一地點分享連結解析修復
+
+引用審查：task/REVIEW.md **2026-07-16（sharelink 座標 optional）**。
+
+## 症狀與根因
+
+使用者貼單一地點短連結 `maps.app.goo.gl/X3zDsKifeHWBQC9s7` 被誤報「僅支援單一地點連結」。實測展開後為 2026-07 新版格式：`/maps/place/<名稱+完整地址>/data=!4m2!3m1!1s0x<hex>:0x<hex>`——**無 !3d!4d、無 @lat,lng**。原 `extractNameAndCoords` 硬性要求座標 → null → 落入 fallback 錯誤（錯誤訊息誤導成「不支援」）。
+
+## 改動（2 檔）
+
+| 檔案 | 內容 |
+|---|---|
+| `lib/sharelink.ts` | `extractNameAndCoords` 座標改 optional（`coords: {lat,lng} | null`）並 export；`searchByNameAndCoords` 簽名改 coords 物件、`locationBias` 條件化（無座標時純文字查詢，名稱段含完整地址足以命中） |
+| `lib/__tests__/sharelink.test.ts` | 新增 4 測試：精確座標、@fallback、**無座標新格式（真實案例 URL 釘住）**、無 place 段回 null |
+
+## 測試結果
+
+- vitest：**159/159 通過**（新增 4）
+- `tsc --noEmit`：通過
+- eslint：通過
+- **真實 API 端對端**：案例名稱段以 searchText（無 bias）精準命中 `ChIJcep34MxZ5DQR5VjNV0a8HWg`（古宇利蝦蝦飯，沖繩）✅
+
+## GLM finding 統計
+
+真 P0/P1：0。P2 記錄不修：1（(0,0) fallback 與既有 fetchPlaceById 慣例一致、fieldmask 保證 location 存在）。假：1（null 防禦——完整程式碼已有 `if (nameCoords)`）。範圍外記錄:2（200m 半徑、regex 對未來格式的脆弱性）。
+
+## 待 peanut 決定
+
+- 改動已在本機 main 工作樹，**未 commit / 未部署**。驗收後：commit + push main → Firebase App Hosting 自動部署。
+- 有座標的既有路徑行為完全未變，回歸風險低。
