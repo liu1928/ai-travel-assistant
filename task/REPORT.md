@@ -116,3 +116,15 @@
 
 - 改動已在本機 main 工作樹，**未 commit / 未部署**。驗收後：commit + push main → Firebase App Hosting 自動部署。
 - 有座標的既有路徑行為完全未變，回歸風險低。
+
+---
+
+# REPORT 2026-07-16（二）：防 Google 改格式三機制
+
+引用審查：task/REVIEW.md 2026-07-16（二）。
+
+1. **失敗 log**：所有解析層都失敗時 `console.error` 完整 finalUrl → Cloud Logging，下次格式變化五分鐘定位。
+2. **第四層保底**：從展開頁 HTML 內嵌 `["0x<CID>","名稱+地址"]` pair 抓名稱（與 URL 結構獨立來源；URL 有 CID 精確配對、配不到寧可失敗不亂抓）。og:title 方案已實測否決（server-side 只拿得到通用 "Google Maps"）。
+3. **Canary**：`GET /api/canary/sharelink`——24h 快取節流，失敗回 503；由 oioi8-kernel probe（seed `atlas-canary`）連 2 次失敗 → LINE 告警。
+
+驗證：vitest 164/164、tsc、eslint、GLM（2 修 2 假 1 P2）。kernel 側 seed 見 oioi8-kernel repo。

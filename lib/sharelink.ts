@@ -20,7 +20,14 @@ const SEARCH_FIELD_MASK =
 const BOT_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
-async function resolveUrl(input: string): Promise<Result<string, ShareLinkError>> {
+// 展開頁 HTML 只在第四層 fallback 用到；GET 已把 body 傳完，text() 只是讀
+// buffer，零額外網路成本。上限截斷防巨頁吃記憶體（text() 已解碼成字串，
+// slice 是字元截斷、不會切出無效 UTF-8）。
+const HTML_MAX_CHARS = 512 * 1024;
+
+async function resolveUrl(
+  input: string,
+): Promise<Result<{ url: string; html: string }, ShareLinkError>> {
   try {
     const res = await fetch(input, {
       method: "GET",
@@ -29,7 +36,10 @@ async function resolveUrl(input: string): Promise<Result<string, ShareLinkError>
       // 沒有 timeout 會讓惡意/慢速目標把請求掛住。5 秒足夠短連結轉址。
       signal: AbortSignal.timeout(5000),
     });
-    return ok(res.url);
+    // 非 2xx（錯誤頁）的 body 不可信——URL 解析各層照走，但別讓第四層
+    // 從錯誤頁 HTML 撈名稱
+    const html = res.ok ? (await res.text().catch(() => "")).slice(0, HTML_MAX_CHARS) : "";
+    return ok({ url: res.url, html });
   } catch (e) {
     return err({ kind: "fetch_error", message: e instanceof Error ? e.message : String(e) });
   }
@@ -103,6 +113,24 @@ export function extractNameAndCoords(
 
   // 無座標：名稱（含地址）仍可用 Text Search 解析
   return { name, coords: null };
+}
+
+// 第四層保底：URL 路徑完全抓不到名稱時（未來 Google 再改 URL 結構），改從
+// 展開頁 HTML 的內嵌資料抓 ["0x<hex>:0x<hex>","<名稱+地址>"] pair——這與 URL
+// 結構是兩套獨立來源，同時改掉的機率低。若 URL 帶 hex CID 就精確配對，
+// 否則取第一組。HTML 中同一 pair 有 `\"` 跳脫與未跳脫兩種形態，regex 都容忍。
+export function extractNameFromHtml(html: string, finalUrl: string): string | null {
+  const cidMatch = finalUrl.match(/0x[0-9a-f]+:0x[0-9a-f]+/i);
+  const pairRe = /\[\\?"(0x[0-9a-f]+:0x[0-9a-f]+)\\?",\\?"([^"\\]{2,300})\\?"/gi;
+  let first: string | null = null;
+  for (const m of html.matchAll(pairRe)) {
+    if (first === null) first = m[2];
+    if (cidMatch && m[1].toLowerCase() === cidMatch[0].toLowerCase()) return m[2];
+  }
+  // URL 有 CID 但 HTML 配不到 → 回 null 而非 first：寧可解析失敗，也不要
+  // 抓到頁面上「別的地點」（推薦清單等）——保底層的錯誤結果比沒結果更糟。
+  // URL 無 CID 時才退用第一組（展開頁的主體就是這個地點）。
+  return cidMatch ? null : first;
 }
 
 async function fetchPlaceById(
@@ -219,7 +247,7 @@ export async function parseShareLink(
 
   const resolved = await resolveUrl(rawUrl);
   if (!resolved.ok) return err(resolved.error);
-  const finalUrl = resolved.value;
+  const { url: finalUrl, html } = resolved.value;
 
   if (!isMapsUrl(finalUrl)) {
     return err({
@@ -241,6 +269,17 @@ export async function parseShareLink(
     const place = await searchByNameAndCoords(nameCoords.name, nameCoords.coords, apiKey);
     if (place) return ok({ kind: "place", places: [place] });
   }
+
+  // 第四層保底：URL 結構認不得時，從展開頁 HTML 內嵌資料抓名稱
+  const htmlName = extractNameFromHtml(html, finalUrl);
+  if (htmlName) {
+    const place = await searchByNameAndCoords(htmlName, null, apiKey);
+    if (place) return ok({ kind: "place", places: [place] });
+  }
+
+  // Google 改 URL/頁面格式時，這行 log 是最快的診斷入口——直接看展開後的
+  // 完整網址長什麼樣，不必重現使用者的連結（2026-07-16 事故教訓）。
+  console.error("[sharelink] all extractors failed, finalUrl:", finalUrl);
 
   return err({
     kind: "unsupported",

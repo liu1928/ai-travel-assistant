@@ -190,3 +190,26 @@
 vitest **159/159**（含新增 4 測試）✅、`tsc --noEmit` ✅、eslint ✅、真實 API 端對端 ✅。
 
 統計：真 P0/P1 0 條、P2 記錄 1 條、假 1 條、既有範圍外 2 條。
+
+---
+
+# GLM 審查 2026-07-16（二）：防 Google 改格式三機制
+
+範圍：`lib/sharelink.ts`（失敗 log finalUrl、第四層 HTML CID-pair 保底、resolveUrl 回 html）+ `app/api/canary/sharelink/route.ts`（新）。focus：correctness、security、記憶體。
+
+## 仲裁
+
+- 🐛1「resolveUrl 未驗 res.ok，錯誤頁 HTML 會進第四層」——**已修**：非 2xx 時 html 取空字串（URL 各層照走）。
+- 🐛2「名稱含 HTML 實體/unicode escape 會截斷」——**P2 記錄不修**。Google 內嵌資料用 `&` 形態 escape，此類 pair 整個 match 不到 → 安全側失效（抓不到，不會抓錯）；第四層是保底層，接受覆蓋率取捨，不引入 JSON parse 複雜度。
+- 🐛3「URL 與 HTML 的 CID 格式可能不一致」——**推測性**：實測兩處完全一致（同 hex pair），測試已釘住。記錄。
+- ⚠️1「canary 無 auth 消耗 quota」——**接受**：24h 快取＋inflight 去重把成本壓到每實例生命週期最多 1 次真呼叫；高頻打只會拿快取。加 token 會讓 secret 進 kernel seed（git），不划算。
+- ⚠️2「inflight race」——**[FALSE POSITIVE]**：Node 單執行緒，`if (!inflight) inflight = ...` 到 await 前是同步的，無交錯窗口（GLM 自己也判可接受）。
+- ⚠️3「slice 切斷 UTF-8 產生無效序列」——**[FALSE POSITIVE]**：`res.text()` 已解碼為 JS 字串，slice 是字元截斷非位元組截斷。變數已改名 HTML_MAX_CHARS 消歧義。
+- 💡2「detail 洩漏內部錯誤」——**已修**：公開回應只給粗粒度原因，詳情進 server log。
+- ❓1「有 CID 配不到為何不退 first」——**刻意設計**（寧可失敗不亂抓頁面上別的地點），已加註解，測試釘住。
+- ❓2「24h 快取延遲發現」——**預期設計**：目標是隔天內發現（Google 改格式是月/年級事件），不值得每 5 分鐘燒 288 次 Places 呼叫。
+
+## 驗證
+
+vitest **164/164**（新增 5 個 extractNameFromHtml 測試）✅、tsc ✅、eslint ✅。
+統計：真且已修 2、P2 記錄 1、假 2、刻意設計/預期 3。

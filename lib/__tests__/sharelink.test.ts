@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { extractNameAndCoords, isAllowedInputUrl, isMapsUrl } from "@/lib/sharelink";
+import {
+  extractNameAndCoords,
+  extractNameFromHtml,
+  isAllowedInputUrl,
+  isMapsUrl,
+} from "@/lib/sharelink";
 
 /**
  * SSRF 防護的核心：只有可信的 Google Maps／短連結網域、且為 https，
@@ -92,5 +97,41 @@ describe("extractNameAndCoords", () => {
   it("URL 沒有 /maps/place/ 段時回 null", () => {
     expect(extractNameAndCoords("https://www.google.com/maps/@25.03,121.56,15z")).toBeNull();
     expect(extractNameAndCoords("https://maps.google.com/?cid=123")).toBeNull();
+  });
+});
+
+/**
+ * 第四層保底：URL 結構完全認不得時，從展開頁 HTML 內嵌的
+ * ["0x<hex>:0x<hex>","<名稱+地址>"] pair 抓名稱。與 URL 結構是獨立來源。
+ */
+describe("extractNameFromHtml", () => {
+  const CID = "0x34e459cce077ea71:0x681dbc4657cd58e5";
+  const NAME = "古宇利蝦蝦飯314 Kouri, Nakijin, Kunigami District, Okinawa 905-0406日本";
+
+  it("以 URL 中的 CID 精確配對 HTML pair（未跳脫形態）", () => {
+    const html = `xx,null,["${CID}","${NAME}"],null`;
+    const url = `https://www.google.com/maps/place/x/data=!4m2!3m1!1s${CID}`;
+    expect(extractNameFromHtml(html, url)).toBe(NAME);
+  });
+
+  it("容忍 \\\" 跳脫形態（頁面內嵌 JS 字串）", () => {
+    const html = `'\\n[[\\"${CID}\\",\\"${NAME}\\"]]'`;
+    const url = `https://www.google.com/maps/place/x/data=!1s${CID}`;
+    expect(extractNameFromHtml(html, url)).toBe(NAME);
+  });
+
+  it("URL 無 CID 時退用第一組 pair", () => {
+    const html = `["0xaaa1:0xbbb2","第一個地點"] ["0xccc3:0xddd4","第二個地點"]`;
+    expect(extractNameFromHtml(html, "https://maps.google.com/?cid=123")).toBe("第一個地點");
+  });
+
+  it("URL 有 CID 但 HTML 配不到 → null（不亂抓別的地點）", () => {
+    const html = `["0xaaa1:0xbbb2","別的地點"]`;
+    const url = `https://www.google.com/maps/place/x/data=!1s0xeee5:0xfff6`;
+    expect(extractNameFromHtml(html, url)).toBeNull();
+  });
+
+  it("HTML 無 pair 時回 null", () => {
+    expect(extractNameFromHtml("<html>Google Maps</html>", "https://maps.google.com/")).toBeNull();
   });
 });
