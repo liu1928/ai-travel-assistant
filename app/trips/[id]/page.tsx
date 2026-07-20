@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useAuth, authedFetch } from "@/lib/use-auth";
 import { GoogleSignInButton } from "@/components/google-signin";
-import type { Flight, CarRental, Lodging } from "@/schema/trip";
+import type { Flight, CarRental, Lodging, DailyWeather, ExchangeRate } from "@/schema/trip";
 import { buildLodgingLink } from "@/lib/booking-link";
 import { attachDurations, reflowTimes, timeToMin, isRouteInsight } from "@/lib/trip-edit";
 import {
@@ -45,6 +45,8 @@ type SavedTrip = {
   flights?: Flight[];
   carRentals?: CarRental[];
   lodgings?: Lodging[];
+  weather?: DailyWeather[];
+  exchangeRate?: ExchangeRate;
   createdAt: number;
 };
 
@@ -80,6 +82,37 @@ const TYPE_LABEL: Record<ScheduleItem["type"], string> = {
 function navUrl(item: ScheduleItem): string {
   const q = item.location ?? item.title;
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
+}
+
+// 天氣描述（lib/weather.ts 產的中文字串）→ emoji，純關鍵字比對
+function weatherEmoji(description: string): string {
+  if (description.includes("雷")) return "⛈️";
+  if (description.includes("雪") || description.includes("冰")) return "🌨️";
+  if (description.includes("雨") || description.includes("毛毛")) return "🌧️";
+  if (description.includes("霧")) return "🌫️";
+  if (description.includes("陰")) return "☁️";
+  if (description.includes("多雲") || description.includes("大致晴")) return "⛅";
+  if (description.includes("晴")) return "☀️";
+  return "🌡️";
+}
+
+// 降雨量門檻：超過視為「雨天」，行程頁標記提醒帶傘（mm/日）
+const RAIN_ALERT_MM = 5;
+
+// 依整趟天氣預報產打包提醒（純衍生，無副作用）
+function buildPackingList(weather: DailyWeather[]): string[] {
+  if (weather.length === 0) return [];
+  const items: string[] = [];
+  const maxT = Math.max(...weather.map((w) => w.maxTempC));
+  const minT = Math.min(...weather.map((w) => w.minTempC));
+  const wettest = Math.max(...weather.map((w) => w.precipitationMm));
+  if (maxT >= 28) items.push("☀️ 短袖薄衫、防曬乳、太陽眼鏡");
+  if (maxT >= 30) items.push("💧 隨身補水，注意中暑");
+  if (minT <= 15) items.push("🧥 外套（早晚偏涼）");
+  if (minT <= 5) items.push("🧣 厚外套、圍巾、保暖配件");
+  if (wettest >= RAIN_ALERT_MM) items.push("☔ 雨傘或輕便雨衣");
+  if (maxT - minT >= 10) items.push("🌡️ 日夜溫差大，建議洋蔥式穿搭");
+  return items;
 }
 
 const SPLIT_BILL_URL = process.env.NEXT_PUBLIC_SPLIT_BILL_URL;
@@ -332,6 +365,23 @@ export default function TripViewPage() {
                 <span>{STYLE_LABEL[view.trip.style]}</span>
                 <span>·</span>
                 <span>預算 {view.trip.budget.min}~{view.trip.budget.max} 元</span>
+                {view.trip.exchangeRate && (
+                  <>
+                    <span>·</span>
+                    <span className="text-teal-600">
+                      ≈ {Math.round(view.trip.budget.min * view.trip.exchangeRate.rate).toLocaleString()}~
+                      {Math.round(view.trip.budget.max * view.trip.exchangeRate.rate).toLocaleString()}{" "}
+                      {view.trip.exchangeRate.to}
+                      <span className="ml-1 text-neutral-400">
+                        (1 TWD≈
+                        {view.trip.exchangeRate.rate < 1
+                          ? view.trip.exchangeRate.rate.toFixed(4)
+                          : view.trip.exchangeRate.rate.toFixed(2)}{" "}
+                        {view.trip.exchangeRate.to})
+                      </span>
+                    </span>
+                  </>
+                )}
               </div>
             </div>
             <div className="flex shrink-0 flex-col items-end gap-2">
@@ -467,9 +517,42 @@ export default function TripViewPage() {
 
           {saveError && <p className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{saveError}</p>}
 
-          {(editing ? draftDays : view.trip.days).map((day, dayIdx) => (
+          {!editing && buildPackingList(view.trip.weather ?? []).length > 0 && (
+            <div className="mb-6 rounded-lg border border-sky-200 bg-sky-50 px-4 py-3">
+              <h3 className="mb-2 text-sm font-semibold text-sky-800">🎒 打包提醒（依天氣預報）</h3>
+              <ul className="space-y-1 text-xs text-sky-700">
+                {buildPackingList(view.trip.weather ?? []).map((it, i) => (
+                  <li key={i}>{it}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {(editing ? draftDays : view.trip.days).map((day, dayIdx) => {
+            // 天氣以陣列索引對齊天數（生成當下 weather 就是從 startDate 連續 days 天）。
+            // 編輯模式、或曾刪天導致天數與 weather 陣列長度不符時，一律不顯示逐日天氣，
+            // 避免索引位移對到錯誤日期（打包清單走整趟聚合不受影響）。GLM REVIEW。
+            const dayWeather =
+              !editing && view.trip.weather && view.trip.weather.length === view.trip.days.length
+                ? view.trip.weather[day.day - 1]
+                : undefined;
+            return (
             <div key={day.day} className="mb-6">
-              <h2 className="mb-2 text-sm font-semibold text-neutral-800">第 {day.day} 天</h2>
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                <h2 className="text-sm font-semibold text-neutral-800">第 {day.day} 天</h2>
+                {dayWeather && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2 py-0.5 text-xs text-sky-700 ring-1 ring-sky-100">
+                    <span>{weatherEmoji(dayWeather.description)}</span>
+                    <span>{dayWeather.description}</span>
+                    <span className="text-sky-500">
+                      {dayWeather.minTempC}–{dayWeather.maxTempC}°C
+                    </span>
+                    {dayWeather.precipitationMm >= RAIN_ALERT_MM && (
+                      <span className="font-medium text-sky-600">☔{dayWeather.precipitationMm}mm 記得帶傘</span>
+                    )}
+                  </span>
+                )}
+              </div>
               <ul className="space-y-2">
                 {day.schedule.map((item, i) => (
                   <li key={i} className="flex gap-3 rounded-lg border border-neutral-200 px-3 py-2.5">
@@ -507,7 +590,8 @@ export default function TripViewPage() {
                 )}
               </ul>
             </div>
-          ))}
+            );
+          })}
 
           {editing ? (
             <div>

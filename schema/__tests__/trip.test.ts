@@ -175,4 +175,47 @@ describe("tripWithBookingsSchema", () => {
     expect("carRentals" in tripSchema.shape).toBe(false);
     expect("lodgings" in tripSchema.shape).toBe(false);
   });
+
+  it("舊文件缺 weather/exchangeRate → weather default []、exchangeRate 省略（免遷移）", () => {
+    const parsed = tripWithBookingsSchema.safeParse(validTrip);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.weather).toEqual([]);
+      expect(parsed.data.exchangeRate).toBeUndefined();
+    }
+  });
+
+  it("接受合法天氣快照與匯率", () => {
+    const full = {
+      ...validTrip,
+      weather: [
+        { date: "2026-09-25", maxTempC: 30, minTempC: 24, precipitationMm: 2.5, description: "晴天" },
+      ],
+      exchangeRate: { from: "TWD", to: "JPY", rate: 4.7 },
+    };
+    const parsed = tripWithBookingsSchema.safeParse(full);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.weather).toHaveLength(1);
+      expect(parsed.data.exchangeRate?.to).toBe("JPY");
+    }
+  });
+
+  it("拒絕負降雨量的天氣快照", () => {
+    const bad = {
+      ...validTrip,
+      weather: [{ date: "2026-09-25", maxTempC: 30, minTempC: 24, precipitationMm: -1, description: "晴天" }],
+    };
+    expect(tripWithBookingsSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("拒絕非正匯率", () => {
+    const bad = { ...validTrip, exchangeRate: { from: "TWD", to: "JPY", rate: 0 } };
+    expect(tripWithBookingsSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("tripSchema（AI 輸出用）沒有 weather/exchangeRate 欄位——防止模型編造天氣/匯率", () => {
+    expect("weather" in tripSchema.shape).toBe(false);
+    expect("exchangeRate" in tripSchema.shape).toBe(false);
+  });
 });

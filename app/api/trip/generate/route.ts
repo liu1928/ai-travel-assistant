@@ -5,6 +5,8 @@ import { generateTrip, type HolidayInfo } from "@/lib/anthropic";
 import { listPlaces } from "@/lib/collection";
 import { estimateLegs, resolveCoordinates, type TravelMode } from "@/lib/routes";
 import { guessCountry, holidaysInRange } from "@/lib/holidays";
+import { fetchWeatherForecast, geocodeCityName, type DailyWeather } from "@/lib/weather";
+import { countryToCurrency, fetchExchangeRate, type ExchangeRate } from "@/lib/currency";
 import { computeTravelDna } from "@/lib/travel-dna";
 import {
   flightSchema,
@@ -106,6 +108,46 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // best-effort：天氣預報（Open-Meteo，免 Key）
+  let weather: DailyWeather[] = [];
+  if (body.startDate && body.days && body.days > 0) {
+    try {
+      // 優先用第一個已有座標的收藏地點，否則從 prompt/地點名 geocode 城市
+      const firstPlace = places.find((p) => p.location?.lat && p.location?.lng);
+      let coords: { lat: number; lng: number } | null = firstPlace?.location ?? null;
+      if (!coords) {
+        // 從 prompt 抓第一個城市關鍵字
+        const cityHint = [body.prompt ?? "", ...places.map((p) => p.name)]
+          .join(" ")
+          .match(/([^\s、，,]+[市區城町村]|Tokyo|Osaka|Seoul|Bangkok|Singapore|KL|Kuala Lumpur|Hong Kong)/i)?.[0];
+        if (cityHint) coords = await geocodeCityName(cityHint);
+      }
+      if (coords) {
+        weather = await fetchWeatherForecast(coords.lat, coords.lng, body.startDate, body.days);
+      }
+    } catch {
+      // best-effort，失敗不影響生成
+    }
+  }
+
+  // best-effort：目的地匯率（Frankfurter，免 Key）
+  let exchangeRate: ExchangeRate | undefined;
+  try {
+    const countryTexts = [
+      ...places.map((p) => p.address ?? ""),
+      ...places.map((p) => p.name),
+      body.prompt ?? "",
+    ];
+    const country = guessCountry(countryTexts);
+    const destCurrency = countryToCurrency(country);
+    if (destCurrency && destCurrency !== "TWD") {
+      const rate = await fetchExchangeRate("TWD", destCurrency);
+      if (rate) exchangeRate = rate;
+    }
+  } catch {
+    // best-effort
+  }
+
   // best-effort：使用者長期偏好畫像（查不到不影響生成，比照 holidays/Routes 降級）。
   // DNA 失敗 = 個人化整層失效（比假日更有感），故留一行 warn 供觀測（GLM REVIEW ❓-1）。
   const dnaResult = await computeTravelDna(auth.value);
@@ -129,6 +171,8 @@ export async function POST(req: NextRequest) {
     carRentals,
     lodgings,
     dna,
+    weather,
+    exchangeRate,
   });
 
   if (!result.ok) {
@@ -194,6 +238,9 @@ export async function POST(req: NextRequest) {
     // Routes 是加值資訊，不影響主要生成結果
   }
 
-  // 使用者輸入的訂位資料附掛回傳（AI 輸出本身不含，見 specs/flights-rentals.md §3）
-  return NextResponse.json({ trip: { ...trip, flights, carRentals, lodgings } });
+  // 使用者輸入的訂位資料 + 生成當下抓的天氣/匯率快照一併附掛回傳
+  //（AI 輸出本身不含這些，見 specs/flights-rentals.md §3；exchangeRate 為 undefined 時 JSON 自動略過）
+  return NextResponse.json({
+    trip: { ...trip, flights, carRentals, lodgings, weather, exchangeRate },
+  });
 }

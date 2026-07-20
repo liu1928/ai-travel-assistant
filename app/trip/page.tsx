@@ -6,7 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth, authedFetch } from "@/lib/use-auth";
 import { GoogleSignInButton } from "@/components/google-signin";
 import type { SavedPlace } from "@/schema/place";
-import type { Flight, CarRental, Lodging } from "@/schema/trip";
+import type { Flight, CarRental, Lodging, DailyWeather, ExchangeRate } from "@/schema/trip";
 import {
   BookingCards,
   BookingsFields,
@@ -40,6 +40,8 @@ type Trip = {
   flights?: Flight[];
   carRentals?: CarRental[];
   lodgings?: Lodging[];
+  weather?: DailyWeather[];       // 生成當下抓的天氣快照，儲存時原樣傳遞
+  exchangeRate?: ExchangeRate;    // 生成當下抓的匯率快照，儲存時原樣傳遞
 };
 
 type GenState =
@@ -104,6 +106,11 @@ function TripGenerateInner() {
 
   const [gen, setGen] = useState<GenState>({ status: "idle" });
   const [save, setSave] = useState<SaveState>({ status: "idle" });
+  const [bestDay, setBestDay] = useState<
+    | { status: "idle" | "loading" }
+    | { status: "error"; message: string }
+    | { status: "done"; best: DailyWeather | null }
+  >({ status: "idle" });
 
   useEffect(() => {
     if (!user) return;
@@ -119,6 +126,25 @@ function TripGenerateInner() {
     const ids = places.filter((p) => p.group === initialGroup).map((p) => p.placeId);
     if (ids.length > 0) setSelectedIds(new Set(ids));
   }, [initialGroup, places]);
+
+  async function suggestBestDay() {
+    // 城市線索優先用勾選的收藏地點名（geocode 命中率高），否則退用一句話輸入
+    const firstSelected = places.find((p) => selectedIds.has(p.placeId));
+    const cityHint = (firstSelected?.name ?? prompt).trim();
+    if (!cityHint) {
+      setBestDay({ status: "error", message: "先輸入地點或勾選收藏，才能查天氣" });
+      return;
+    }
+    setBestDay({ status: "loading" });
+    try {
+      const res = await authedFetch(`/api/weather/best-days?city=${encodeURIComponent(cityHint)}`);
+      const data = (await res.json()) as { best?: DailyWeather | null; error?: string };
+      if (!res.ok) throw new Error(data.error ?? "查詢失敗");
+      setBestDay({ status: "done", best: data.best ?? null });
+    } catch (e) {
+      setBestDay({ status: "error", message: e instanceof Error ? e.message : "查詢失敗" });
+    }
+  }
 
   function toggleSelect(placeId: string) {
     setSelectedIds((prev) => {
@@ -273,6 +299,31 @@ function TripGenerateInner() {
             className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
           />
           <p className="mt-1 text-xs text-neutral-400">填了會自動偵測當地連假、避開人潮</p>
+          <button
+            type="button"
+            onClick={() => void suggestBestDay()}
+            disabled={bestDay.status === "loading"}
+            className="mt-1 text-xs text-teal-700 hover:text-teal-900 disabled:opacity-40"
+          >
+            {bestDay.status === "loading" ? "查詢未來 16 天…" : "🌤️ 推薦最佳出遊日"}
+          </button>
+          {bestDay.status === "error" && <p className="mt-1 text-xs text-red-600">{bestDay.message}</p>}
+          {bestDay.status === "done" &&
+            (bestDay.best ? (
+              <p className="mt-1 text-xs text-teal-700">
+                未來 16 天 {bestDay.best.date} 最佳（{bestDay.best.description}，{bestDay.best.minTempC}–
+                {bestDay.best.maxTempC}°C）
+                <button
+                  type="button"
+                  onClick={() => setStartDate(bestDay.best!.date)}
+                  className="ml-2 underline hover:text-teal-900"
+                >
+                  套用
+                </button>
+              </p>
+            ) : (
+              <p className="mt-1 text-xs text-neutral-400">查不到該地天氣（換個地點名再試）</p>
+            ))}
         </div>
         <div>
           <label className="mb-1 block text-xs font-medium text-neutral-500">天數</label>

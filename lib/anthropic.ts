@@ -14,6 +14,8 @@ import {
   expectedDayForWeekday,
   checkWeekdayTimeSignal,
 } from "./trip-days";
+import type { DailyWeather } from "./weather";
+import type { ExchangeRate } from "./currency";
 
 const MODEL = envOr("ANTHROPIC_MODEL", "claude-sonnet-4-6");
 
@@ -211,6 +213,8 @@ export type GenerateTripInput = {
   carRentals?: CarRental[]; // 使用者已訂租車
   lodgings?: Lodging[]; // 使用者已訂住宿（硬約束，行程地理/時間錨點）
   dna?: TravelDna; // 使用者長期偏好畫像（收藏聚合）；缺席或收藏太少則不注入
+  weather?: DailyWeather[];   // 行程期間逐日天氣（best-effort，查不到不影響生成）
+  exchangeRate?: ExchangeRate; // 目的地匯率（best-effort）
 };
 
 // 冷啟動門檻：收藏太少時偏好分布是雜訊，不注入畫像避免過擬合。
@@ -289,6 +293,23 @@ export function buildUserMessage(input: GenerateTripInput): string {
     const lines = input.holidays.map((h) => `- ${h.date}：${h.name}`).join("\n");
     parts.push(
       `行程期間當地假日/特殊日子（人潮預警）：\n${lines}\n\n請據此調整行程：熱門景點避開假日尖峰（改排冷門時段或替代地點）、餐廳提醒可能需要訂位、在 insights 中明確提醒使用者哪幾天人潮較多與建議對策。`,
+    );
+  }
+
+  if (input.weather && input.weather.length > 0) {
+    const lines = input.weather
+      .map((w) => `- ${w.date}：${w.description}，${w.minTempC}–${w.maxTempC}°C，降雨 ${w.precipitationMm}mm`)
+      .join("\n");
+    parts.push(
+      `行程期間天氣預報（Open-Meteo）：\n${lines}\n\n請在 insights 依此給衣物／雨傘／防曬建議，高溫或大雨天在對應 stop 加注提醒。`,
+    );
+  }
+
+  if (input.exchangeRate) {
+    const { from, to, rate } = input.exchangeRate;
+    const rateStr = rate < 1 ? rate.toFixed(4) : rate.toFixed(2);
+    parts.push(
+      `匯率參考（${from} → ${to}：1 ${from} ≈ ${rateStr} ${to}）：budget 估算請同時標注目的地貨幣（${to}）金額，insights 可附換算提醒。`,
     );
   }
 

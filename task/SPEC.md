@@ -208,3 +208,34 @@ pnpm typecheck && pnpm test && pnpm lint
 - resolveCoordinates 用名稱模糊比對，非 place_id 精確對應
 - 行程生成品質完全依賴 prompt，尚無固定 eval 基準
 - Routes API 只估相鄰兩點，不做全域路線最佳化（AI 排序 + 真實車程驗證的組合）
+
+---
+
+## 10. 天氣與匯率加值資料（2026-07-20 補記契約）
+
+> 天氣（Open-Meteo，`lib/weather.ts`）與匯率（Frankfurter，`lib/currency.ts`）皆**免 Key**、best-effort，失敗不影響行程生成。
+
+### 10.1 生成時抓取（`/api/trip/generate`）
+- request body 另收 `startDate?`（YYYY-MM-DD）；有 `startDate`+`days` 才抓天氣。
+- 天氣座標來源：第一個有座標的收藏地點 → 否則 prompt/地點名 geocode 城市關鍵字。
+- 匯率：`guessCountry` → `countryToCurrency` → `fetchExchangeRate("TWD", 目的地幣)`（目的地為 TWD 則略過）。
+- 回傳 `{ trip: { …, weather: DailyWeather[], exchangeRate?: ExchangeRate } }`。
+- 兩者也注入 AI prompt（`lib/anthropic.ts` `buildUserMessage`）供 insights/budget 參考。
+
+### 10.2 Schema（`schema/trip.ts`）
+- `dailyWeatherSchema` = `{ date(YYYY-MM-DD), maxTempC, minTempC, precipitationMm(≥0), description }`。
+- `exchangeRateSchema` = `{ from, to, rate(>0) }`，語意 1 from = rate to。
+- 只加在 `tripWithBookingsSchema`（`weather` default []、`exchangeRate` optional，舊文件免遷移）；**絕不加進 `tripSchema`**（AI structured output，加了模型會編造天氣/匯率）。
+
+### 10.3 新增端點
+- `GET /api/rates?base=TWD`（需登入）→ `{ base, rates }`，`rates[X]` = 1 base = X（供記帳頁多幣別折 TWD）。
+- `GET /api/weather/best-days?city=<名>`（需登入）→ `{ forecast: DailyWeather[], best: DailyWeather|null }`，掃未來 16 天挑 `scoreDayWeather` 最高日。
+
+### 10.4 前端呈現
+- 行程頁 `/trips/[id]`：逐日天氣 chip（索引對齊 `weather[day.day-1]`；`weather.length===days.length` 才顯示，防編輯刪天後位移）、雨天（≥5mm）帶傘提醒、整趟打包清單、預算 TWD↔目的地幣雙標卡（用生成快照）。
+- 記帳頁 `/trips/[id]/expenses`：各外幣依即時 `/api/rates` 折 TWD 顯示「全部折合 TWD」，對照行程 `budget.max` 超支標紅（外幣→TWD 用 `amount / rate`）。
+- 生成頁 `/trip`：「推薦最佳出遊日」按鈕 → `/api/weather/best-days` → 可一鍵套用為出發日期。
+
+### 10.5 已知取捨
+- 行程頁匯率＝生成快照、記帳頁＝即時匯率，語意不同可能小幅不一致（刻意）。
+- 記帳幣別維持 TWD/USD/JPY/EUR；多幣別擴充屬 follow-up。

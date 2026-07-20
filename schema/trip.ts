@@ -99,10 +99,34 @@ export const lodgingSchema = z.object({
 });
 export type Lodging = z.infer<typeof lodgingSchema>;
 
-// 儲存/編輯用：Trip + 訂位資料。舊 Firestore 文件缺欄位 → default 補空陣列，免資料遷移。
+// --- 天氣與匯率（生成當下抓的加值快照，附掛在儲存行程上）---
+// ⚠️ 同 flights：這些欄位絕不能進 tripSchema（AI structured output），否則模型會編造
+// 天氣/匯率數字。只掛在 tripWithBookingsSchema，由 /api/trip/generate 生成後附掛。
+// 形狀對齊 lib/weather.ts DailyWeather 與 lib/currency.ts ExchangeRate。
+
+export const dailyWeatherSchema = z.object({
+  date: z.string().regex(datePattern, "date 必須是 YYYY-MM-DD 格式"),
+  maxTempC: z.number(),
+  minTempC: z.number(),
+  precipitationMm: z.number().nonnegative(),
+  description: z.string().min(1),
+});
+export type DailyWeather = z.infer<typeof dailyWeatherSchema>;
+
+export const exchangeRateSchema = z.object({
+  from: z.string().min(1), // 來源貨幣，例 "TWD"
+  to: z.string().min(1),   // 目標貨幣，例 "JPY"
+  rate: z.number().positive(), // 1 from = rate to
+});
+export type ExchangeRate = z.infer<typeof exchangeRateSchema>;
+
+// 儲存/編輯用：Trip + 訂位資料 + 天氣/匯率快照。
+// 舊 Firestore 文件缺欄位 → default 補空/略過，免資料遷移。
 export const tripWithBookingsSchema = tripSchema.extend({
   flights: z.array(flightSchema).default([]),
   carRentals: z.array(carRentalSchema).default([]),
   lodgings: z.array(lodgingSchema).default([]),
+  weather: z.array(dailyWeatherSchema).default([]),
+  exchangeRate: exchangeRateSchema.optional(),
 });
 export type TripWithBookings = z.infer<typeof tripWithBookingsSchema>;

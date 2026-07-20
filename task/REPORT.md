@@ -128,3 +128,58 @@
 3. **Canary**：`GET /api/canary/sharelink`——24h 快取節流，失敗回 503；由 oioi8-kernel probe（seed `atlas-canary`）連 2 次失敗 → LINE 告警。
 
 驗證：vitest 164/164、tsc、eslint、GLM（2 修 2 假 1 P2）。kernel 側 seed 見 oioi8-kernel repo。
+
+---
+
+# REPORT 2026-07-20：天氣/匯率延伸功能（補完已抓卻未落地的資料）
+
+引用審查：task/REVIEW.md **2026-07-20（天氣/匯率延伸功能）**。
+
+## 背景
+
+天氣（Open-Meteo，`lib/weather.ts`）與匯率（Frankfurter，`lib/currency.ts`）本已在 `/api/trip/generate` 抓好並注入 AI prompt（`lib/anthropic.ts`），但抓來的**結構化資料餵完 AI 就丟掉**：沒進 schema、沒存 Firestore、前端零顯示（此兩檔在工作樹屬未提交的進行中工作）。本輪把它補成完整、看得到、存得住、能算的功能，涵蓋使用者選定的四個方向：①行程頁顯示天氣 ②記帳頁匯率換算 ③天氣智慧 ④匯率預算智慧。
+
+## 做了什麼
+
+1. **資料落地（Phase 1）**：`schema/trip.ts` 的 `tripWithBookingsSchema` 加 `weather`（`z.array(dailyWeatherSchema).default([])`）與 `exchangeRate`（`exchangeRateSchema.optional()`）；**刻意不加進 `tripSchema`**（AI structured output，加了會讓模型編造）。`/api/trip/generate` 回傳附掛 weather/exchangeRate。儲存往返靠既有 `savedTripSchema = tripWithBookingsSchema.shape + …` 自動流通，舊文件靠 default 免遷移。
+2. **行程頁顯示（Phase 1+3）**：`app/trips/[id]/page.tsx` 每日標題掛天氣 chip（emoji＋高低溫＋降雨；降雨 ≥5mm 加「記得帶傘」）、預算列旁匯率雙標卡（TWD↔目的地幣）、整趟打包清單（依高低溫/降雨/溫差衍生）。
+3. **記帳頁換算＋超支預警（Phase 2）**：`app/trips/[id]/expenses/page.tsx` 新增「全部折合 TWD ≈ X」與對照行程 `budget.max` 的超支標紅；走新 `GET /api/rates`（`lib/currency.ts` 的 `fetchExchangeRates` 多目標）。
+4. **最佳出遊日（Phase 3）**：新 `GET /api/weather/best-days` 掃未來 16 天預報，用 `scoreDayWeather`（降雨/極端溫度扣分）挑體感最好的一天；`/trip` 生成頁加按鈕，可一鍵套用為出發日期。
+
+## 改動檔案
+
+| 檔案 | 變更 |
+|---|---|
+| `schema/trip.ts` | 加 dailyWeatherSchema/exchangeRateSchema；tripWithBookingsSchema 擴充 weather/exchangeRate |
+| `app/api/trip/generate/route.ts` | 回傳附掛 weather/exchangeRate（抓取邏輯本已存在） |
+| `app/trips/[id]/page.tsx` | weatherEmoji/buildPackingList；逐日天氣 chip（長度守衛防位移）；預算匯率卡；打包清單 |
+| `app/trips/[id]/expenses/page.tsx` | totalInTwd 換算；/api/rates + budget fetch；折合 TWD 卡＋超支預警 |
+| `app/api/rates/route.ts` | 新檔：GET（需登入）回 TWD→USD/JPY/EUR 即時匯率 |
+| `app/api/weather/best-days/route.ts` | 新檔：GET（需登入）16 天預報挑最佳日 |
+| `app/trip/page.tsx` | Trip 型別加 weather/exchangeRate；suggestBestDay + UI |
+| `lib/currency.ts` | 新增 fetchExchangeRates（多目標） |
+| `lib/weather.ts` | 新增 scoreDayWeather |
+| `schema/__tests__/trip.test.ts` | 新增 5 條：weather default、合法快照、負降雨/非正匯率拒絕、tripSchema 排除 |
+
+## 測試結果
+
+- `pnpm typecheck`：過
+- `pnpm test`：**14 files / 169 tests 全過**（本輪新增 5）
+- `pnpm lint`：過
+- `pnpm build`：過（`/api/rates`、`/api/weather/best-days` 正確註冊）
+
+## GLM finding 統計（詳 task/REVIEW.md 2026-07-20）
+
+真且已修 2（`totalInTwd` 加 `|| 0` 防 NaN；行程頁天氣加 `weather.length===days.length` 守衛防編輯刪天後索引位移）、假/現況不成立 2、刻意設計 3、不修 1、已答 2。
+⚠️ 工具限制：本輪 review_code 多數回傳被 harness 壓縮成無法展開的內容參考，僅一則取得可讀全文（原封收於 REVIEW.md），其餘改以聚焦小批＋主線獨立驗證處理，換算方向已自驗正確（Frankfurter `from=TWD&to=X` = 1 TWD = N X；外幣→TWD 除、TWD→外幣乘）。
+
+## Known issues / 已知取捨（不阻擋）
+
+1. **匯率快照 vs 即時**：行程頁預算用生成當下的 `exchangeRate` 快照（規劃基準）、記帳頁用即時 `/api/rates`（已標「僅供參考」）。兩者語意不同、可能小幅不一致，屬刻意設計。
+2. **多幣別擴充未做**：記帳幣別維持 TWD/USD/JPY/EUR；擴充 `COUNTRY_TO_CURRENCY`／expense `currency` enum 屬「視需要」follow-up，未在本輪範圍。
+3. **weather 城市 geocode 為 best-effort**：`/api/trip/generate` 以第一個有座標的收藏地點或 prompt 城市關鍵字定位，冷門地名可能查無 → 天氣為空（不影響行程生成）。
+4. **best-days geocode 命中率**：優先用勾選收藏地點名；純一句話輸入可能 geocode 失敗 → 回「查不到」。
+
+## 部署
+
+改動在本機工作樹，**未 commit / 未部署**（本輪含先前未提交的 weather/currency 進行中工作）。依鐵律停止於此，等 peanut 驗收後再決定 commit + push（Firebase App Hosting 自動部署）。

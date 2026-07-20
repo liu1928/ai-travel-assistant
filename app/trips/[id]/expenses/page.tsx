@@ -78,6 +78,20 @@ function formatAmount(currency: Currency, amount: number): string {
   return amount.toLocaleString("zh-TW", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
+// 各外幣依即時匯率折回 TWD。rates 語意：1 TWD = rates[X] X，故 1 X = 1/rates[X] TWD。
+// 缺任一「有金額卻查不到匯率」的幣別就回 null——寧可不顯示，也不給漏算的錯誤總額。
+function totalInTwd(byCurrency: ByCurrency, rates: Record<string, number> | null): number | null {
+  if (!rates) return null;
+  let total = byCurrency.TWD || 0; // 防 byCurrency 形狀變動時 NaN 傳播（GLM REVIEW）
+  for (const c of ["USD", "JPY", "EUR"] as const) {
+    if (byCurrency[c] <= 0) continue;
+    const rate = rates[c];
+    if (!rate || rate <= 0) return null;
+    total += byCurrency[c] / rate;
+  }
+  return total;
+}
+
 // ───────── component ─────────
 
 export default function ExpensesPage() {
@@ -87,6 +101,8 @@ export default function ExpensesPage() {
 
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [rates, setRates] = useState<Record<string, number> | null>(null);
+  const [budgetMax, setBudgetMax] = useState<number | null>(null);
   const [form, setForm] = useState<FormState>(defaultForm());
   const [editingId, setEditingId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -109,6 +125,29 @@ export default function ExpensesPage() {
   useEffect(() => {
     void fetchExpenses();
   }, [fetchExpenses]);
+
+  // best-effort：即時匯率（換算 TWD 總計）＋ 行程預算上限（超支預警）。取不到就不顯示。
+  useEffect(() => {
+    if (!user) return;
+    void (async () => {
+      try {
+        const [ratesRes, tripRes] = await Promise.all([
+          authedFetch("/api/rates?base=TWD"),
+          authedFetch(`/api/trips/${tripId}`),
+        ]);
+        if (ratesRes.ok) {
+          const d = (await ratesRes.json()) as { rates?: Record<string, number> };
+          setRates(d.rates ?? {});
+        }
+        if (tripRes.ok) {
+          const d = (await tripRes.json()) as { trip?: { budget?: { max?: number } } };
+          if (typeof d.trip?.budget?.max === "number") setBudgetMax(d.trip.budget.max);
+        }
+      } catch {
+        // 加值資訊，失敗不影響記帳主功能
+      }
+    })();
+  }, [user, tripId]);
 
   // ── submit (create or update) ──
   async function handleSubmit(e: React.FormEvent) {
@@ -203,6 +242,8 @@ export default function ExpensesPage() {
 
   const { byCurrency, byCategory } = computeSummary(expenses);
   const hasTotals = Object.values(byCurrency).some((v) => v > 0);
+  const twdTotal = totalInTwd(byCurrency, rates);
+  const overBudget = twdTotal !== null && budgetMax !== null && twdTotal > budgetMax;
 
   return (
     <main className="mx-auto max-w-xl px-5 py-12">
@@ -353,6 +394,30 @@ export default function ExpensesPage() {
               </div>
             ))}
           </div>
+
+          {/* 折合 TWD 總計 + 超支預警 */}
+          {twdTotal !== null && (
+            <div
+              className={`mb-4 rounded-lg border px-4 py-3 ${
+                overBudget ? "border-red-300 bg-red-50" : "border-teal-200 bg-teal-50"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-neutral-500">全部折合 TWD</span>
+                <span className={`text-base font-semibold ${overBudget ? "text-red-700" : "text-teal-800"}`}>
+                  ≈ {formatAmount("TWD", Math.round(twdTotal))}
+                </span>
+              </div>
+              {budgetMax !== null && (
+                <p className={`mt-1 text-xs ${overBudget ? "text-red-600" : "text-neutral-400"}`}>
+                  {overBudget
+                    ? `⚠️ 已超出行程預算上限（${formatAmount("TWD", budgetMax)} 元）`
+                    : `行程預算上限 ${formatAmount("TWD", budgetMax)} 元`}
+                </p>
+              )}
+              <p className="mt-1 text-[11px] text-neutral-400">依即時匯率換算，僅供參考</p>
+            </div>
+          )}
 
           {/* 分類明細 */}
           <div className="space-y-2">
