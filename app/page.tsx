@@ -56,6 +56,12 @@ export default function Home() {
     | { status: "done"; checked: number; emptyFound: number; updated: number; failed: number }
     | { status: "error"; message: string }
   >({ status: "idle" });
+  const [refreshStatus, setRefreshStatus] = useState<
+    | { status: "idle" }
+    | { status: "running" }
+    | { status: "done"; scanned: number; updated: number; closedFound: number; failed: number; remaining: number }
+    | { status: "error"; message: string }
+  >({ status: "idle" });
 
   // 群組成員編輯
   const [memberEditGroup, setMemberEditGroup] = useState<string | null>(null);
@@ -266,6 +272,29 @@ export default function Home() {
     }
   }
 
+  async function runRefreshStatus() {
+    setRefreshStatus({ status: "running" });
+    try {
+      const res = await authedFetch("/api/collection/refresh-status", { method: "POST" });
+      const data = (await res.json()) as {
+        scanned?: number; updated?: number; closedFound?: number; failed?: number; remaining?: number;
+        error?: string;
+      };
+      if (!res.ok || data.scanned === undefined) throw new Error(data.error ?? "檢查歇業狀態失敗");
+      setRefreshStatus({
+        status: "done",
+        scanned: data.scanned,
+        updated: data.updated ?? 0,
+        closedFound: data.closedFound ?? 0,
+        failed: data.failed ?? 0,
+        remaining: data.remaining ?? 0,
+      });
+      if ((data.updated ?? 0) > 0) await loadCollection();
+    } catch (e) {
+      setRefreshStatus({ status: "error", message: e instanceof Error ? e.message : "檢查歇業狀態失敗" });
+    }
+  }
+
   // 依群組分組，未分類放最後
   const groupMap = new Map<string, SavedPlace[]>();
   const ungrouped: SavedPlace[] = [];
@@ -285,7 +314,15 @@ export default function Home() {
       <li className="rounded-lg border border-neutral-200 px-4 py-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <p className="truncate text-sm font-medium text-neutral-900">{p.name}</p>
+            <div className="flex items-center gap-1.5">
+              <p className="truncate text-sm font-medium text-neutral-900">{p.name}</p>
+              {(p.businessStatus === "CLOSED_PERMANENTLY" || p.businessStatus === "NOT_FOUND") && (
+                <span className="shrink-0 rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-700">已歇業</span>
+              )}
+              {p.businessStatus === "CLOSED_TEMPORARILY" && (
+                <span className="shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">暫停營業</span>
+              )}
+            </div>
             {p.address && <p className="truncate text-xs text-neutral-500">{p.address}</p>}
           </div>
           <button onClick={() => void remove(p.placeId)} disabled={busyId === p.placeId} className="shrink-0 text-xs text-neutral-400 transition-colors hover:text-red-600 disabled:opacity-40">刪除</button>
@@ -421,16 +458,35 @@ export default function Home() {
             我的收藏{saved.length > 0 && <span className="text-neutral-400">（{saved.length}）</span>}
           </h2>
           {saved.length > 0 && (
-            <button
-              onClick={() => void runBatchRetag()}
-              disabled={batchRetag.status === "running"}
-              className="rounded-lg border border-neutral-300 px-3 py-1 text-xs font-medium text-neutral-600 hover:bg-neutral-50 disabled:opacity-40 transition-colors"
-            >
-              {batchRetag.status === "running" ? "檢查中…" : "一鍵批次重新標籤"}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => void runRefreshStatus()}
+                disabled={refreshStatus.status === "running"}
+                className="rounded-lg border border-neutral-300 px-3 py-1 text-xs font-medium text-neutral-600 hover:bg-neutral-50 disabled:opacity-40 transition-colors"
+              >
+                {refreshStatus.status === "running" ? "檢查中…" : "檢查歇業狀態"}
+              </button>
+              <button
+                onClick={() => void runBatchRetag()}
+                disabled={batchRetag.status === "running"}
+                className="rounded-lg border border-neutral-300 px-3 py-1 text-xs font-medium text-neutral-600 hover:bg-neutral-50 disabled:opacity-40 transition-colors"
+              >
+                {batchRetag.status === "running" ? "檢查中…" : "一鍵批次重新標籤"}
+              </button>
+            </div>
           )}
         </div>
 
+        {refreshStatus.status === "done" && (
+          <p className="mb-3 rounded-lg bg-teal-50 px-3 py-2 text-xs text-teal-700">
+            共檢查 {refreshStatus.scanned} 筆，發現 {refreshStatus.closedFound} 筆已歇業
+            {refreshStatus.failed > 0 && `，${refreshStatus.failed} 筆查詢失敗`}
+            {refreshStatus.remaining > 0 && `，還有 ${refreshStatus.remaining} 筆待檢查（稍後再按一次）`}
+          </p>
+        )}
+        {refreshStatus.status === "error" && (
+          <p className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{refreshStatus.message}</p>
+        )}
         {batchRetag.status === "done" && (
           <p className="mb-3 rounded-lg bg-teal-50 px-3 py-2 text-xs text-teal-700">
             共檢查 {batchRetag.checked} 筆，其中 {batchRetag.emptyFound} 筆是空標籤，已補上 {batchRetag.updated} 筆

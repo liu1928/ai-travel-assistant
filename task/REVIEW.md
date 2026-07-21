@@ -315,4 +315,57 @@ tsc ✅、eslint ✅、vitest **169/169**（新增 5：weather/exchangeRate sche
 
 `pnpm typecheck` ✅、`pnpm test` **177/177**（新增 8：schedule anchoring schema）✅、`pnpm lint` ✅、`pnpm build` ✅。
 人工實測（生成流程、Firestore 讀寫）待 peanut 部署後驗收，見 task/REPORT.md。
+
+---
+
+# REVIEW — GLM-5.2 異質審查（Place Freshness，specs/place-freshness.md）
+
+> 時間戳：2026-07-21（二）（Asia/Taipei）
+> 審查範圍：`schema/place.ts`（businessStatus/statusCheckedAt）、`lib/place-status.ts`（新）、
+> `lib/collection.ts`（updatePlaceStatus）、`app/api/collection/refresh-status/route.ts`（新）、
+> `lib/quotas.ts`、`app/page.tsx`（按鈕+徽章）、`app/api/trip/generate/route.ts`（生成排除）、
+> `lib/anthropic.ts`（CLOSED_TEMPORARILY 註記）、`lib/__tests__/place-status.test.ts`（新）。
+> diff 見 task/diff.patch。審查者：GLM-5.2（MCP `glm-reviewer.review_code`），本輪取得可讀全文（工具恢復正常）。
+
+### 🐛 問題點
+
+**1. `trip.insights.push(...)` 懷疑沒有效果（DB 唯讀物件/型別不符）**
+**2. `checkAndConsume` 傳 `batch.length * SERVICE_COST_USD.places_status` 有浮點精度問題，且失敗的呼叫沒有退款機制**
+
+### ⚠️ 風險
+
+**1. `mapLimit(4)` 併發下的計數器 race condition（懷疑 `fetchBusinessStatus`/`updatePlaceStatus` 若未捕捉例外會漏算）**
+**2. 404 特判與其他分支一致性——Google 可能對無效 place ID 回 400/403 而非 404，導致該地點被歸類 `failed` 而非 `NOT_FOUND`**
+**3. TTL 排序把 `statusCheckedAt` 缺席當 0（1970 年）處理**
+
+### 💡 建議
+
+**1. 統一 `classifyStatus` 判斷來源——一律先讀 body 再連同 status 一起交給 `classifyStatus`，不要在 `fetchBusinessStatus` 內對 404 特判**
+**2. `route.ts` 的 `places`/`excludedClosedNames` 雙重 filter 可以合併成單次遍歷**
+
+### ❓ 待釐清問題
+
+1. `trip.insights.push` 之後有沒有真的被存下/回傳？
+2. `checkAndConsume` 是否該支援部分退款？
+3. `mapLimit` 是否保證所有 Promise 都會 resolve 不會 throw？
+
+## 仲裁（逐條）
+
+| 類別 | Finding | 判定 | 依據 / 處置 |
+|---|---|---|---|
+| 🐛 | `trip.insights.push` 沒效果 | **假（GLM 未見完整上下文）** | `grep` 驗證：`const trip = result.value`（第 202 行）是 AI 生成結果的一般可變物件，非唯讀/非 DB 讀出；同函式既有的 Routes API insights push（第 248/257 行，本輪之前就存在）是完全相同的模式；最終 `return NextResponse.json({trip:{...trip,...}})`（第 268 行）把整個 mutate 後的物件回傳。GLM 只收到片段 diff 沒看到這三處上下文才誤判。 |
+| 🐛 | 浮點精度（`50*0.017=0.8500000000000001`） | **真（現況）／不修** | 實測 `node -e` 確認誤差確實存在（IEEE 754 標準行為），但誤差量級 1e-16 對 $2/$10 這種美元級預算完全無感知；且 `SERVICE_COST_USD` 本身明文是「粗估上界，只為相對比較與熔斷，非精算帳單」，全部服務項的成本加總本來就是浮點數（`estCostUsd: FieldValue.increment(spend)`），這是既有全域特性，非本次新增。不在單一 feature 修全域護欄的精度模型。 |
+| 🐛 | 失敗呼叫沒退款 | **假（現況設計）** | 專案所有付費服務都是「呼叫前預扣、不論成敗」（`trip_generate`/`flight_lookup`/`tagging_batch` 皆同），這是護欄的既定哲學（估上界防濫用，非精算帳單），不是本 spec 引入的新問題。若要改全域退款機制屬更大工程，不在本輪範圍。 |
+| ⚠️ | mapLimit 計數器 race | **假（Result pattern 保證不 throw）** | 讀 `fetchBusinessStatus`/`updatePlaceStatus` 原始碼：兩者整個函式體都包在 try/catch 內，所有路徑回 `ok`/`err`，不會 rethrow——本專案 Result pattern 慣例本來就要求「不丟例外」（CLAUDE.md 跨專案慣例），這個保證讓 GLM 假設的漏算情境不會發生。 |
+| ⚠️ | 404 以外的錯誤碼可能代表無效 place ID | **真（現況）／記錄不修** | spec §1.2 明文只定義 404→NOT_FOUND，未要求特判 400/403；照 spec 實作。這類地點會落在 `failed`（下次 TTL 到期再重試），不會誤標成 OPERATIONAL 或悄悄消失，屬可接受的降級，非資料錯誤。記錄為已知限制。 |
+| ⚠️ | `statusCheckedAt` 缺席當 0 排序 | **確認為預期設計** | 從未檢查過的地點理應優先掃描，GLM 自己也認同這不是問題。 |
+| 💡 | 統一 classifyStatus 判斷來源 | **採納已修** | 拿掉 `fetchBusinessStatus` 內的 404 特判分支，一律讀 body（含 404，解析失敗退 null）交給 `classifyStatus` 統一判斷；`classifyStatus` 判斷順序（404 優先、非 2xx 次之）保證行為不變，程式更內聚。`pnpm typecheck`/`pnpm test`（185/185）重跑確認無迴歸。 |
+| 💡 | 合併雙重 filter | **不修** | 收藏地點量級（單使用者上百筆）對兩次 `Array.filter` 的效能影響可忽略，現有寫法（分兩個具名陣列）比合併成單一迴圈更易讀，不值得為此犧牲可讀性。 |
+| ❓ | insights push 有無效果 | **已答（同上，假）** | 見第一條仲裁。 |
+| ❓ | 是否支援部分退款 | **已答（同上，現況設計）** | 見上。 |
+| ❓ | mapLimit 保證不 throw？ | **已答** | mapLimit 本身不吞例外，但呼叫端（`fetchBusinessStatus`/`updatePlaceStatus`）保證不 throw，兩者相加等於安全。 |
+
+## 驗證
+
+`pnpm typecheck` ✅、`pnpm test` **185/185**（新增 8：classifyStatus）✅、`pnpm lint` ✅、`pnpm build` ✅（`/api/collection/refresh-status` 正確註冊）。
 統計：真且已修 2（NaN 防呆、weather 索引位移守衛）、假/現況不成立 2、刻意設計 3、不修 1、已答 2。

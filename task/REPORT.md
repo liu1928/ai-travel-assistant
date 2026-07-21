@@ -237,3 +237,65 @@
 ## 部署
 
 改動在本機工作樹，**未 commit / 未部署**。依鐵律停止於此，等 peanut 驗收後再決定 commit + push（Firebase App Hosting 自動部署）。人工實測基準（待部署後跑）：①生成一筆勾選收藏地點的新行程 → Firestore doc 的 schedule item 帶 `placeId`/`lat`/`lng`、trip 帶 `startDate`；②讀取一筆舊行程（無新欄位）→ 頁面正常渲染不炸驗證。
+
+---
+
+# REPORT 2026-07-21（二）：Place Freshness（`specs/place-freshness.md`）
+
+引用審查：task/REVIEW.md **2026-07-21（二）（Place Freshness）**。
+
+## 背景
+
+Google Maps 收藏放久了會有店家歇業，AI 生成行程不知道會把歇業店排進去。本輪用 Places Details 的 `businessStatus`（Pro SKU，$17/1K，免費 5,000 次/月）掃描收藏、標記歇業，生成時自動排除。這是 8 份延伸功能 spec 的第二份，選在 `opening-hours` 之前做，用便宜情境先驗證「Details GET + TTL 快取 + 配額」這套模式。
+
+## 做了什麼
+
+1. **`schema/place.ts`**：`savedPlaceSchema` 加 `businessStatus`（`OPERATIONAL`/`CLOSED_TEMPORARILY`/`CLOSED_PERMANENTLY`/`NOT_FOUND`，全 optional）與 `statusCheckedAt`（epoch ms，optional）。
+2. **`lib/place-status.ts`（新）**：`fetchBusinessStatus(placeId)` 呼叫 Places Details（`X-Goog-FieldMask: id,businessStatus`），抽出純函式 `classifyStatus(httpStatus, body)` 負責分類邏輯（供單測）；404 或 body 缺欄位/`UNSPECIFIED` 都有明確對應。
+3. **`lib/collection.ts`**：新增 `updatePlaceStatus`，比照既有 `updateTags` 寫回 Firestore。
+4. **`app/api/collection/refresh-status/route.ts`（新）**：篩選 `statusCheckedAt` 缺席或超過 TTL（預設 7 天，`STATUS_TTL_DAYS` 可調）的地點，最舊優先，取前 `REFRESH_STATUS_CAP`（預設 50）筆；0 筆時直接回不扣配額；否則 `checkAndConsume` 預扣 `批次筆數 × $0.017`，`mapLimit(4)` 併發抓取並寫回。
+5. **`lib/quotas.ts`**：登記 `places_status: 0.017`。
+6. **`app/page.tsx`**：收藏區標題列加「檢查歇業狀態」按鈕（沿用既有批次重新標籤的狀態機款式）；地點名稱旁加紅（已歇業）/黃（暫停營業）徽章。
+7. **`app/api/trip/generate/route.ts`**：勾選的收藏地點在送進生成前過濾掉 `CLOSED_PERMANENTLY`/`NOT_FOUND`，有剔除時 `insights` 附加「已自動排除歇業地點：X、Y」。
+8. **`lib/anthropic.ts`**（spec 檔案表外，技術必要，PLAN 已先說明）：`buildUserMessage` 组地點清單時，`CLOSED_TEMPORARILY` 的地點行尾加「（暫停營業中，避免排入或提醒使用者確認）」。
+
+## 改動檔案
+
+| 檔案 | 變更 |
+|---|---|
+| `schema/place.ts` | 加 `businessStatus`/`statusCheckedAt`（全 optional） |
+| `lib/place-status.ts`（新） | `fetchBusinessStatus` + 純函式 `classifyStatus` |
+| `lib/collection.ts` | 新增 `updatePlaceStatus` |
+| `app/api/collection/refresh-status/route.ts`（新） | 批次掃描端點（TTL+cap+配額+併發） |
+| `lib/quotas.ts` | 登記 `places_status: 0.017` |
+| `app/page.tsx` | 「檢查歇業狀態」按鈕 + PlaceCard 紅/黃徽章 |
+| `app/api/trip/generate/route.ts` | 生成前過濾歇業地點 + insights 註記 |
+| `lib/anthropic.ts` | `buildUserMessage` 暫停營業提示語 |
+| `lib/__tests__/place-status.test.ts`（新） | `classifyStatus` 9 條：404/缺欄位/UNSPECIFIED/OPERATIONAL/CLOSED_*/非2xx |
+
+## 測試結果
+
+- `pnpm typecheck`：過
+- `pnpm test`：**15 files / 185 tests 全過**（本輪新增 8）
+- `pnpm lint`：過
+- `pnpm build`：過（`/api/collection/refresh-status` 正確註冊）
+
+## GLM review 統計（詳 task/REVIEW.md 2026-07-21（二））
+
+本輪工具恢復正常，取得完整可讀審查（對比上一輪 schedule-anchoring 全滅）。🐛 2、⚠️ 3、💡 2、❓ 3。仲裁：
+- **假 2**：「`trip.insights.push` 沒效果」——GLM 未見完整上下文的誤判，實測 grep 驗證 `trip` 是一般可變物件且既有 Routes insights push 是完全相同模式；「失敗呼叫沒退款」——專案所有付費服務皆「呼叫前預扣、不論成敗」的既定護欄哲學，非本次引入。
+- **真但不修 2**：浮點精度誤差（現況全域行為，量級對美元預算無感知）；404 以外錯誤碼可能誤判成 `failed` 而非 `NOT_FOUND`（spec 只定義 404，照 spec 實作，降級到下次 TTL 重試，非資料錯誤）。
+- **假（Result pattern 保證）1**：mapLimit 計數器 race——`fetchBusinessStatus`/`updatePlaceStatus` 皆整體包 try/catch、不 rethrow，符合專案 Result pattern 慣例，GLM 假設的漏算情境不會發生。
+- **採納已修 1**：統一 `classifyStatus` 判斷來源，拿掉 `fetchBusinessStatus` 內的 404 特判分支，改一律讀 body 交給 `classifyStatus` 統一判斷；typecheck/test（185/185）重跑確認無迴歸。
+- **不修 1**：雙重 filter 合併——資料量級可忽略，現況更易讀。
+
+## Known issues / 已知取捨（不阻擋）
+
+1. **`classifyStatus` 只精確處理 404**：Google 若對無效 place ID 回其他 4xx（400/403），會落在 `failed` 而非 `NOT_FOUND`，下次 TTL 到期會再重試；spec §1.2 本就只定義 404 這一種特例。
+2. **成本護欄呼叫前預扣、失敗不退款**：跟專案其他所有付費服務（`trip_generate`/`flight_lookup`/`tagging_batch`）一致的既有哲學，非本次引入的新問題。
+3. **人工實測缺口**：沒有真實已知歇業的 place ID 可測，只驗證了「正常營業」與單元測試覆蓋的分類邏輯；`CLOSED_PERMANENTLY`/`NOT_FOUND` 的端對端排除路徑（含生成排除、UI 紅色徽章）需要 peanut 部署後提供一個真實案例驗證。
+4. **`fetchBusinessStatus`/route.ts 批次流程沒有自動化整合測試**：跟 aerodatabox 429 重試路徑同類已知缺口（本專案無 fetch mock 慣例），只靠 `classifyStatus` 純函式單測 + 型別系統把關。
+
+## 部署
+
+改動在本機工作樹，**未 commit / 未部署**。依鐵律停止於此，等 peanut 驗收後再決定 commit + push。人工實測基準（待部署後跑，需真實歇業 place）：①按「檢查歇業狀態」→ place doc 出現 `businessStatus`/`statusCheckedAt`，已知歇業店標紅徽章；②立刻再按一次 → `scanned:0`，配額不增加（TTL 生效）；③收藏含歇業店生成行程 → 該店不出現，insights 有排除說明；④未登入打 API → 401。

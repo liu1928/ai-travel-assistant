@@ -9,6 +9,7 @@ export const SERVICE_COST_USD = {
   tagging_batch: 0.01, // Haiku 批次/單筆一次
   import_resolve: 0.05, // 每次匯入請求固定（逐筆計費留待項目 B 的 MAX_IMPORT）
   flight_lookup: 0.02, // AeroDataBox 一次（免費層約 300 次/月；$ 值只為相對護欄，實際限制在月額度）
+  places_status: 0.017, // Places Details（Pro SKU）一次，$17/1K；批次呼叫時乘以筆數傳入
 } as const;
 export type PaidService = keyof typeof SERVICE_COST_USD;
 

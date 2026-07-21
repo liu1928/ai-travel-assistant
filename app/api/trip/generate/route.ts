@@ -85,11 +85,20 @@ export async function POST(req: NextRequest) {
   }
 
   let places: SavedPlace[] = [];
+  // 歇業地點排除（specs/place-freshness.md §1.5）：永久歇業/已下架直接剔除不排進生成；
+  // 暫停營業不剔除（資訊時效性存疑），只在 lib/anthropic.ts 的 prompt 行尾加提醒。
+  let excludedClosedNames: string[] = [];
   if (body.placeIds && body.placeIds.length > 0) {
     const all = await listPlaces(auth.value);
     if (all.ok) {
       const idSet = new Set(body.placeIds);
-      places = all.value.filter((p) => idSet.has(p.placeId));
+      const selected = all.value.filter((p) => idSet.has(p.placeId));
+      places = selected.filter(
+        (p) => p.businessStatus !== "CLOSED_PERMANENTLY" && p.businessStatus !== "NOT_FOUND",
+      );
+      excludedClosedNames = selected
+        .filter((p) => p.businessStatus === "CLOSED_PERMANENTLY" || p.businessStatus === "NOT_FOUND")
+        .map((p) => p.name);
     }
   }
 
@@ -191,6 +200,10 @@ export async function POST(req: NextRequest) {
   }
 
   const trip = result.value;
+
+  if (excludedClosedNames.length > 0) {
+    trip.insights.push(`已自動排除歇業地點：${excludedClosedNames.join("、")}`);
+  }
 
   // best-effort：用 Routes API 補相鄰景點的實際車程，失敗不影響主要結果
   try {

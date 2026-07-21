@@ -5,6 +5,7 @@ import {
   type PlaceSearchResult,
   type PlaceTag,
   type SavedPlace,
+  type BusinessStatus,
 } from "@/schema/place";
 import { ok, err, type Result } from "./result";
 
@@ -97,6 +98,20 @@ export async function updateTags(
 ): Promise<Result<null, CollectionError>> {
   try {
     await placesCol(uid).doc(placeId).update({ tags, updatedAt: Date.now() });
+    return ok(null);
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+export async function updatePlaceStatus(
+  uid: string,
+  placeId: string,
+  status: BusinessStatus,
+  checkedAt: number,
+): Promise<Result<null, CollectionError>> {
+  try {
+    await placesCol(uid).doc(placeId).update({ businessStatus: status, statusCheckedAt: checkedAt });
     return ok(null);
   } catch (e) {
     return fail(e);

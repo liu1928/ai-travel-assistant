@@ -240,7 +240,11 @@ export function buildUserMessage(input: GenerateTripInput): string {
       .map((p) => {
         const tags = p.tags.length > 0 ? `（${p.tags.join("、")}）` : "";
         const addr = p.address ? ` - ${p.address}` : "";
-        return `- ${p.name}${tags}${addr}`;
+        // 永久歇業/已下架的地點在 route.ts 已被剔除，不會出現在這裡；暫停營業資訊時效性存疑，
+        // 不剔除但提醒 AI 避免排入或請使用者確認（specs/place-freshness.md §1.5）。
+        const closedNote =
+          p.businessStatus === "CLOSED_TEMPORARILY" ? "（暫停營業中，避免排入或提醒使用者確認）" : "";
+        return `- ${p.name}${tags}${addr}${closedNote}`;
       })
       .join("\n");
     parts.push(`收藏地點列表（可增減以達最佳體驗）：\n${lines}`);

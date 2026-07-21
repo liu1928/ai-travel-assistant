@@ -269,3 +269,33 @@ stops 才判斷 `allResolved`。這個設計成立的前提是 `array.filter()` 
 **已知限制（未修）**：route.ts 的寫回邏輯（`stop.placeId = …` 那段）沒有自動化測試覆蓋——本專案
 沒有 fetch mock 慣例，這條路徑目前只靠上面提到的獨立驗證腳本 + 型別系統把關，不是回歸測試。跟
 2026-07-11 那輪「429 重試路徑沒有自動化測試」是同一類已知缺口。
+
+---
+
+## 2026-07-21（二）：Place Freshness（第二份下游 spec）+ GLM review 這輪恢復正常
+
+**任務**：實作 `specs/place-freshness.md`。做法見 PLAN.md/REPORT.md 對應節。這裡記兩件事。
+
+**GLM review 這輪完全恢復**（上一輪 schedule-anchoring 4 次全滅）：一次呼叫就拿到完整可讀全文，
+4 條 finding 都能正常仲裁。**修正上一輪的推論**：連續退化不代表工具永久壞掉，可能真的只是那個
+時段的暫時性問題（額度尖峰/服務抖動）。已更新跨 session 記憶 `glm-review-tool-issues`，記錄「已恢復」
+這個新資料點，避免下次一看到失敗就直接放棄重試——但同一輪內重試 2-3 次仍全滅時，還是先切自我驗證，
+不要無限重試。
+
+**沒有 fetch mock 慣例時的測試策略**：`fetchBusinessStatus` 本身包一層 `fetch`，直接測會需要
+mock。這輪做法是抽出純函式 `classifyStatus(httpStatus, body)` 只測分類邏輯（404/缺欄位/UNSPECIFIED/
+CLOSED_*/非 2xx），完全不用碰網路——跟 `lib/aviationstack.ts` 的 `hhmmFromScheduled` 抽出手法同一招。
+`fetchBusinessStatus` 本身（含 fetch 呼叫、try/catch）維持不測，記為已知缺口（跟 429 重試路徑同類）。
+**這個「抽純函式」招式看起來會是本專案處理『I/O 包裝函式想測分類/決策邏輯』的標準解法**，下次遇到
+類似情境（呼叫外部 API 但邏輯核心是純判斷）可以直接套用，不用重新想。
+
+**GLM 這輪最有價值的一條**：抓到 `checkAndConsume` 的 cost 參數傳入 `n * 單價` 有浮點數精度問題
+（`50*0.017=0.8500000000000001`）——實測後確認量級對美元級預算完全無感知（護欄本來就是「粗估上界」，
+不是精算帳單），但這提醒了一件事：**所有服務成本加總本來就是浮點數**（`estCostUsd` 全用 `+`），
+這是全域既有特性，不是這輪新增的問題，仲裁時要說清楚「真但不修，因為是既有系統性行為」而不是輕描
+淡寫「不算 bug」。
+
+**GLM 誤判**：「`trip.insights.push` 沒效果，懷疑是唯讀物件」——只是因為只餵了片段 diff，沒看到
+`const trip = result.value`（一般可變物件）跟既有 Routes insights push 是同一個模式。**教訓：送審
+片段 diff 給 GLM 時，如果改動的變數在片段外有定義來源，GLM 容易對型別/可變性做出錯誤假設**——這類
+finding 用 grep 找一下變數宣告處就能秒判真假，比爭論「理論上可能怎樣」快很多。

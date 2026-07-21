@@ -26,13 +26,25 @@ export const placeSearchResultSchema = z.object({
 });
 export type PlaceSearchResult = z.infer<typeof placeSearchResultSchema>;
 
-// 收藏進 Firestore 的地點 = 搜尋結果 + 標籤 + 備註 + 群組 + 時間戳。
+// 歇業狀態（specs/place-freshness.md）。NOT_FOUND = Details 回 404（place 已從 Google 下架），
+// 不是 Google 明講的狀態，但 UI 同等級警示；全 optional，舊資料免遷移。
+export const businessStatus = z.enum([
+  "OPERATIONAL",
+  "CLOSED_TEMPORARILY",
+  "CLOSED_PERMANENTLY",
+  "NOT_FOUND",
+]);
+export type BusinessStatus = z.infer<typeof businessStatus>;
+
+// 收藏進 Firestore 的地點 = 搜尋結果 + 標籤 + 備註 + 群組 + 時間戳 + 歇業狀態。
 export const savedPlaceSchema = placeSearchResultSchema.extend({
   tags: z.array(placeTag),
   note: z.string(),
   group: z.string().optional(), // 自訂群組名稱，例如「沖繩」「台中規劃」
   createdAt: z.number(), // epoch ms
   updatedAt: z.number(),
+  businessStatus: businessStatus.optional(),
+  statusCheckedAt: z.number().optional(), // epoch ms，上次檢查歇業狀態的時間
 });
 export type SavedPlace = z.infer<typeof savedPlaceSchema>;
 
