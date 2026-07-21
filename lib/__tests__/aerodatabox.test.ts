@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { splitLocalDateTime, pickFlight, type AdbFlight } from "@/lib/aerodatabox";
+import { splitLocalDateTime, pickFlight, daysDiff, type AdbFlight } from "@/lib/aerodatabox";
 
 /**
  * AeroDataBox 回應解析（純函式，不打 API）。
@@ -123,5 +123,56 @@ describe("pickFlight", () => {
       departure: { airport: { name: "Taychzhun" } },
     });
     expect(pickFlight([bothMissing], "JX302")).toBeUndefined();
+  });
+});
+
+describe("pickFlight — 即時動態欄位（specs/flight-day-status.md，欄位名經 BR198 真實 API 呼叫核對）", () => {
+  it("有 status/revisedTime/terminal/gate → 全部帶出", () => {
+    const live = row({
+      status: "Delayed",
+      departure: {
+        airport: { name: "Taoyuan International", iata: "TPE" },
+        scheduledTime: { local: "2026-07-25 08:05+08:00" },
+        revisedTime: { local: "2026-07-25 08:45+08:00" },
+        terminal: "2",
+        gate: "D17",
+      },
+      arrival: {
+        airport: { name: "Narita International", iata: "NRT" },
+        scheduledTime: { local: "2026-07-25 12:20+09:00" },
+        revisedTime: { local: "2026-07-25 13:00+09:00" },
+        terminal: "1S",
+      },
+    });
+    const r = pickFlight([live], "BR198");
+    expect(r?.status).toBe("Delayed");
+    expect(r?.revisedDepartTime).toBe("08:45");
+    expect(r?.revisedArriveTime).toBe("13:00");
+    expect(r?.departTerminal).toBe("2");
+    expect(r?.departGate).toBe("D17");
+    expect(r?.arriveTerminal).toBe("1S");
+  });
+
+  it("未來日期（尚未進入即時追蹤）→ 這些欄位全部 undefined，不影響既有 schedule 欄位", () => {
+    const r = pickFlight([row()], "BR198");
+    expect(r?.status).toBeUndefined();
+    expect(r?.revisedDepartTime).toBeUndefined();
+    expect(r?.departTerminal).toBeUndefined();
+    expect(r?.departTime).toBe("08:05"); // 既有欄位不受影響
+  });
+});
+
+describe("daysDiff — 兩個 YYYY-MM-DD 相差天數（specs/flight-day-status.md 的 ±1 天容忍）", () => {
+  it("同一天 → 0", () => {
+    expect(daysDiff("2026-07-21", "2026-07-21")).toBe(0);
+  });
+
+  it("差一天（前一天/後一天）→ ±1", () => {
+    expect(daysDiff("2026-07-22", "2026-07-21")).toBe(1);
+    expect(daysDiff("2026-07-20", "2026-07-21")).toBe(-1);
+  });
+
+  it("差兩天以上 → 絕對值 > 1", () => {
+    expect(Math.abs(daysDiff("2026-07-25", "2026-07-21"))).toBeGreaterThan(1);
   });
 });

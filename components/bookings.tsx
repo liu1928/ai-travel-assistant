@@ -141,6 +141,114 @@ export function draftsToBookings(
 
 // --- 顯示卡（唯讀）---
 
+// --- 出發日航班即時動態（specs/flight-day-status.md）---
+
+type FlightStatusData = {
+  status?: string;
+  revisedDepartTime?: string;
+  revisedArriveTime?: string;
+  departTerminal?: string;
+  departGate?: string;
+  arriveTerminal?: string;
+};
+type FlightStatusState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ready"; data: FlightStatusData }
+  | { status: "error"; message: string };
+
+/** client 本地日（YYYY-MM-DD），比對 flight.date 決定是否顯示「查即時動態」按鈕。 */
+function todayLocalDate(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function FlightStatusRow({ flightNo, date, departTime, arriveTime }: {
+  flightNo: string;
+  date: string;
+  departTime: string;
+  arriveTime: string;
+}) {
+  const cacheKey = `flight-status:${flightNo}:${date}`;
+  const [state, setState] = useState<FlightStatusState>(() => {
+    if (typeof window === "undefined") return { status: "idle" };
+    const cached = sessionStorage.getItem(cacheKey);
+    if (!cached) return { status: "idle" };
+    try {
+      return { status: "ready", data: JSON.parse(cached) as FlightStatusData };
+    } catch {
+      return { status: "idle" };
+    }
+  });
+
+  async function fetchStatus() {
+    setState({ status: "loading" });
+    try {
+      const res = await authedFetch("/api/flight/lookup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ flightNo, date, mode: "status" }),
+      });
+      const data = (await res.json()) as FlightStatusData & { error?: string };
+      if (!res.ok) throw new Error(data.error ?? "查詢失敗");
+      setState({ status: "ready", data });
+      sessionStorage.setItem(cacheKey, JSON.stringify(data));
+    } catch (e) {
+      setState({ status: "error", message: e instanceof Error ? e.message : "查詢失敗" });
+    }
+  }
+
+  if (state.status === "idle") {
+    return (
+      <button onClick={() => void fetchStatus()} className="ml-2 text-xs text-teal-700 hover:text-teal-900">
+        查即時動態
+      </button>
+    );
+  }
+  if (state.status === "loading") {
+    return <span className="ml-2 text-xs text-neutral-400">查詢中…</span>;
+  }
+  if (state.status === "error") {
+    return <span className="ml-2 text-xs text-red-600">{state.message}</span>;
+  }
+
+  const d = state.data;
+  const depChanged = d.revisedDepartTime && d.revisedDepartTime !== departTime;
+  const arrChanged = d.revisedArriveTime && d.revisedArriveTime !== arriveTime;
+  const hasAny = d.status || depChanged || arrChanged || d.departTerminal || d.departGate || d.arriveTerminal;
+
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
+      {hasAny ? (
+        <>
+          {d.status && <span className="font-medium text-teal-700">{d.status}</span>}
+          {depChanged && (
+            <span className="font-medium text-red-600">
+              起飛 {departTime} → {d.revisedDepartTime}
+            </span>
+          )}
+          {arrChanged && (
+            <span className="font-medium text-red-600">
+              抵達 {arriveTime} → {d.revisedArriveTime}
+            </span>
+          )}
+          {(d.departTerminal || d.departGate) && (
+            <span className="text-neutral-500">
+              航廈{d.departTerminal ?? "-"}/登機門{d.departGate ?? "-"}
+            </span>
+          )}
+          {d.arriveTerminal && <span className="text-neutral-500">抵達航廈{d.arriveTerminal}</span>}
+        </>
+      ) : (
+        <span className="text-neutral-400">暫無即時資料</span>
+      )}
+      <button onClick={() => void fetchStatus()} className="text-neutral-400 hover:text-teal-700">
+        ↻ 重新整理
+      </button>
+    </div>
+  );
+}
+
 export function BookingCards({ flights, carRentals, lodgings }: { flights?: Flight[]; carRentals?: CarRental[]; lodgings?: Lodging[] }) {
   const hasFlights = !!flights && flights.length > 0;
   const hasRentals = !!carRentals && carRentals.length > 0;
@@ -163,6 +271,9 @@ export function BookingCards({ flights, carRentals, lodgings }: { flights?: Flig
                   {f.date ? `${f.date} ` : ""}{f.departTime}–{f.arriveTime}
                 </span>
                 {f.note && <span className="ml-1 text-xs text-neutral-400">（{f.note}）</span>}
+                {f.date && f.date === todayLocalDate() && (
+                  <FlightStatusRow flightNo={f.flightNo} date={f.date} departTime={f.departTime} arriveTime={f.arriveTime} />
+                )}
               </li>
             ))}
           </ul>

@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireUid } from "@/lib/auth";
 import { checkAndConsume, rateLimitHttp } from "@/lib/rate-limit";
-import { lookupFlight } from "@/lib/aerodatabox";
+import { lookupFlight, todayTaipeiDate, daysDiff } from "@/lib/aerodatabox";
 
 // 航班號 + 出發日 → 該日排定航線 + 起降時刻（AeroDataBox，真實資料）。按鈕觸發，走用量護欄。
 // 見 specs/flight-lookup.md（2026-07-11 換源：帶日期查未來班表，解換季改時刻查不到的問題）。
@@ -15,7 +15,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: message }, { status, headers: { "Retry-After": String(retryAfterSec) } });
   }
 
-  const body = (await req.json().catch(() => null)) as { flightNo?: unknown; date?: unknown } | null;
+  const body = (await req.json().catch(() => null)) as
+    | { flightNo?: unknown; date?: unknown; mode?: unknown }
+    | null;
   // 先正規化（trim/大寫/去空白）再驗證，讓 regex 與實際送 API 的字串一致
   const raw = typeof body?.flightNo === "string" ? body.flightNo : "";
   const flightNo = raw.trim().toUpperCase().replace(/\s+/g, "");
@@ -27,6 +29,12 @@ export async function POST(req: NextRequest) {
   const rawDate = typeof body?.date === "string" ? body.date.trim() : "";
   if (rawDate && !/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
     return NextResponse.json({ error: "日期格式不正確（需為 YYYY-MM-DD）" }, { status: 400 });
+  }
+  // mode 預設 "schedule"（既有行為零迴歸）；"status" 是即時動態查詢（specs/flight-day-status.md）——
+  // 只在「今天」（出發地日期，以台灣時區近似，±1 天容忍時區落差）才有意義，也是額度保護的硬閘門。
+  const mode = body?.mode === "status" ? "status" : "schedule";
+  if (mode === "status" && rawDate && Math.abs(daysDiff(rawDate, todayTaipeiDate())) > 1) {
+    return NextResponse.json({ error: "即時動態只能查詢今天出發的航班" }, { status: 400 });
   }
 
   const result = await lookupFlight(flightNo, rawDate || undefined);

@@ -411,4 +411,47 @@ tsc ✅、eslint ✅、vitest **169/169**（新增 5：weather/exchangeRate sche
 
 `pnpm typecheck` ✅、`pnpm test` **212/212**（新增 30：opening-hours 26 條 + trip-days weekdayForDay 4 條，
 含自我審查追加的 1 條防禦性測試）✅、`pnpm lint` ✅、`pnpm build` ✅。
+
+---
+
+# REVIEW — GLM-5.2 異質審查（Flight Day Status，specs/flight-day-status.md）
+
+> 時間戳：2026-07-21（四）（Asia/Taipei）
+> 審查範圍：`lib/aerodatabox.ts`（即時動態欄位解析 + `todayTaipeiDate`/`daysDiff`）、
+> `app/api/flight/lookup/route.ts`（`mode` 參數）、`components/bookings.tsx`（`FlightStatusRow`）、
+> `lib/__tests__/aerodatabox.test.ts`（新增測試）。diff 見 task/diff.patch。
+> 審查者：GLM-5.2（MCP `glm-reviewer.review_code`）。
+>
+> ⚠️ 工具限制：本輪 3 次呼叫（完整 diff、聚焦 4 個風險點的精簡片段、最小化的 useState/sessionStorage 片段）
+> 全部失敗——2 次壓縮不可讀、1 次 504。已按 [[glm-review-tool-issues]] 記錄的流程切自我驗證，
+> 聚焦送審 prompt 裡列出的 4 個風險點。
+
+## 聚焦重審（GLM 全數不可用，改主線獨立驗證）
+
+- **`daysDiff` 的 UTC 午夜比較是否有時區/DST 邊界問題**：兩端都固定加 `T00:00:00Z` 轉成 UTC 時間戳
+  相減，全程沒有觸碰任何在地時區或 DST 規則，數學上不可能受時區/夏令時影響。寫獨立腳本驗證跨月、
+  跨年、閏年 2/29 邊界（`daysDiff("2028-03-01","2028-02-29")` → 1），全部正確。
+- **`sessionStorage` 快取 key 只用「航班號+日期」，同瀏覽器分頁換帳號是否有資料混淆風險**：
+  存在但風險評估為可接受不修——快取內容（航班狀態/航廈/登機門）本身是公開航班資訊，非個人化
+  敏感資料（任何人查同一航班號都拿到同樣結果），換帳號後看到前一位使用者的快取只是「舊資料」
+  而非「別人的隱私」，且有「重新整理」按鈕可強制更新。加 uid 進 cache key 需要多傳一層 prop，
+  對這個近乎不會發生的邊界（兩人同瀏覽器分頁換帳號、且剛好都訂了同號同日期的航班）不成比例，
+  記錄為已知限制不修。
+- **`mode` 參數預設值與既有呼叫的相容性**：`body?.mode === "status" ? "status" : "schedule"`——
+  任何非精確字串 `"status"` 的值（含 `undefined`/缺欄位/其他字串）一律落回 `"schedule"`，既有呼叫
+  （不帶 `mode` 欄位）行為完全不變。`pnpm test` 217/217 全過，既有 lookup 相關測試無迴歸佐證。
+- **`FlightStatusRow` 在 `useState` lazy initializer 讀 `sessionStorage` 的 SSR/hydration 風險**：
+  讀程式碼確認`BookingCards`（`FlightStatusRow` 的唯一掛載處）在兩個使用頁面（`app/trips/[id]/page.tsx`
+  的 `view.status==="ready"`、`app/trip/page.tsx` 的 `gen.status==="done"`）都是「資料透過
+  `useEffect`/使用者觸發的非同步操作載入後才渲染」的閘門模式——這兩種 state 的初始值分別是
+  `"loading"`/`"idle"`，never `"ready"`/`"done"` 於伺服器端渲染當下，`useEffect` 本身也不在 SSR
+  執行。因此 `BookingCards`/`FlightStatusRow` **從未出現在伺服器渲染的 HTML 裡**，component 只會在
+  純 client 環境掛載，`typeof window === "undefined"` 這條防禦分支實務上是不會觸發的死路徑（保留
+  無害，但不是必要的 hydration 保護——因為根本沒有需要對齊的 SSR 輸出）。
+
+## 驗證
+
+`pnpm typecheck` ✅、`pnpm test` **217/217**（新增 5：pickFlight 即時欄位 2 條 + daysDiff 3 條）✅、
+`pnpm lint` ✅、`pnpm build` ✅。額外：`GET https://aerodatabox.../flights/number/BR198/{today}` 真實
+API 呼叫核對即時追蹤欄位名稱（`status`/`revisedTime`/`terminal`/`gate`），非憑文件猜測。
 統計：真且已修 2（NaN 防呆、weather 索引位移守衛）、假/現況不成立 2、刻意設計 3、不修 1、已答 2。

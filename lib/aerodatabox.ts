@@ -13,6 +13,14 @@ export type FlightLookupResult = {
   departTime: string; // HH:mm（機場當地）
   arriveTime: string; // HH:mm（機場當地，跨日不另計）
   dataDate: string; // 這筆班表的出發地當地日期 YYYY-MM-DD——讓前端標示資料屬於哪一天
+  // 即時動態欄位（specs/flight-day-status.md）：只有臨近出發日、AeroDataBox 已進入即時追蹤
+  // 才會有值（未來日期自然缺席，同一支端點同一次呼叫，零額外成本）。
+  status?: string; // 例 Expected/EnRoute/Delayed/Departed/Arrived/Canceled…（AeroDataBox 原文，未翻譯）
+  revisedDepartTime?: string; // HH:mm，實際/修正後的起飛時刻
+  revisedArriveTime?: string;
+  departTerminal?: string;
+  departGate?: string;
+  arriveTerminal?: string;
 };
 export type FlightLookupError =
   | { kind: "missing_key" }
@@ -25,10 +33,20 @@ type AdbTime = { utc?: string; local?: string }; // local 例："2026-07-25 08:0
 // scheduledTime＝正式排班公告；predictedTime＝尚無正式排班、但已進入即時追蹤的推估值
 // （常見於「今天／快起飛」的航班）。兩者互斥出現，缺 scheduledTime 時要 fallback 到 predictedTime，
 // 否則這類航班會被 pickFlight 濾掉、誤判成查無資料（實測 JX302 案例，見 lib/__tests__/aerodatabox.test.ts）。
-type AdbMovement = { airport?: AdbAirport; scheduledTime?: AdbTime; predictedTime?: AdbTime };
+// revisedTime/terminal/gate 只在即時追蹤時才有（specs/flight-day-status.md）；
+// 欄位名經真實 API 呼叫核對（BR198 today，2026-07-21 實測），非憑文件猜測。
+type AdbMovement = {
+  airport?: AdbAirport;
+  scheduledTime?: AdbTime;
+  predictedTime?: AdbTime;
+  revisedTime?: AdbTime;
+  terminal?: string;
+  gate?: string;
+};
 export type AdbFlight = {
   number?: string;
   airline?: { name?: string; iata?: string };
+  status?: string;
   departure?: AdbMovement;
   arrival?: AdbMovement;
 };
@@ -46,6 +64,18 @@ export function splitLocalDateTime(s: string | undefined): { date: string; hhmm:
 
 // 固定時區/格式 → 模組層共用一個 formatter（GLM REVIEW 第 2 輪建議）
 const TAIPEI_DATE_FMT = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Taipei" });
+
+/** 台灣時區的今日日期（YYYY-MM-DD）。route.ts 驗證 mode:"status" 的 date 是否為「今天」用。 */
+export function todayTaipeiDate(): string {
+  return TAIPEI_DATE_FMT.format(new Date());
+}
+
+/** 兩個 YYYY-MM-DD 字串相差幾天（a - b）；格式不合回 NaN。 */
+export function daysDiff(a: string, b: string): number {
+  const da = new Date(`${a}T00:00:00Z`).getTime();
+  const db = new Date(`${b}T00:00:00Z`).getTime();
+  return Math.round((da - db) / 86_400_000);
+}
 
 // `${airport} ${iata}`；任一缺就用有的那個；都缺 → 空字串（呼叫端當該筆不可用）
 function airportLabel(a: AdbAirport | undefined): string {
@@ -87,6 +117,8 @@ export function pickFlight(rows: AdbFlight[], flightNo: string): FlightLookupRes
 
   // 航空公司：第一層離線中文名優先，沒有再用 API 英文名（與舊 AviationStack 行為一致）
   const airline = airlineFromFlightNo(flightNo) ?? (best.row.airline?.name?.trim() || undefined);
+  const revisedDep = splitLocalDateTime(best.row.departure?.revisedTime?.local ?? best.row.departure?.revisedTime?.utc);
+  const revisedArr = splitLocalDateTime(best.row.arrival?.revisedTime?.local ?? best.row.arrival?.revisedTime?.utc);
   return {
     airline,
     from: best.from,
@@ -94,6 +126,12 @@ export function pickFlight(rows: AdbFlight[], flightNo: string): FlightLookupRes
     departTime: best.dep.hhmm,
     arriveTime: best.arr.hhmm,
     dataDate: best.dep.date,
+    status: best.row.status,
+    revisedDepartTime: revisedDep?.hhmm,
+    revisedArriveTime: revisedArr?.hhmm,
+    departTerminal: best.row.departure?.terminal,
+    departGate: best.row.departure?.gate,
+    arriveTerminal: best.row.arrival?.terminal,
   };
 }
 
