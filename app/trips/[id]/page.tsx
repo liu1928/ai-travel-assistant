@@ -1,18 +1,20 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
 import { useAuth, authedFetch } from "@/lib/use-auth";
 import { GoogleSignInButton } from "@/components/google-signin";
 import { resolveDayMapItems } from "@/lib/day-map";
+import { currentTripDay, todayLocalDateStr, findNextStopIndex } from "@/lib/trip-day";
 import type { Flight, CarRental, Lodging, DailyWeather, ExchangeRate } from "@/schema/trip";
 import { buildLodgingLink } from "@/lib/booking-link";
 import { attachDurations, reflowTimes, timeToMin, isRouteInsight } from "@/lib/trip-edit";
 import {
   BookingCards,
   BookingsFields,
+  FlightStatusRow,
   draftsToBookings,
   flightToDraft,
   rentalToDraft,
@@ -89,7 +91,14 @@ const TYPE_LABEL: Record<ScheduleItem["type"], string> = {
   rest: "休息",
 };
 
+// 有座標（地基欄位）時走精確的 dir deep link；沒有時退回既有的文字搜尋（specs/trip-day-mode.md §1.2）。
+// Google Maps URLs 是免費 deep link，不計 API 用量；手機開啟 app、桌面開網頁。
 function navUrl(item: ScheduleItem): string {
+  if (typeof item.lat === "number" && typeof item.lng === "number") {
+    const params = new URLSearchParams({ api: "1", destination: `${item.lat},${item.lng}` });
+    if (item.placeId) params.set("destination_place_id", item.placeId);
+    return `https://www.google.com/maps/dir/?${params.toString()}`;
+  }
   const q = item.location ?? item.title;
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
 }
@@ -161,6 +170,15 @@ export default function TripViewPage() {
   const [icsError, setIcsError] = useState<string | null>(null);
   const [offlineBanner, setOfflineBanner] = useState(false);
 
+  // 旅途模式（specs/trip-day-mode.md）：今天是行程第幾天。缺 startDate 或今天不在行程期間 → null，
+  // 頁面行為與現在完全一致（增強而非改版）。
+  const today = todayLocalDateStr();
+  const tripDay = view.status === "ready" ? currentTripDay(view.trip.startDate, view.trip.days.length, today) : null;
+  const todayFlights =
+    tripDay !== null && view.status === "ready" ? (view.trip.flights ?? []).filter((f) => f.date === today) : [];
+  const nowDate = new Date();
+  const nowHHMM = `${String(nowDate.getHours()).padStart(2, "0")}:${String(nowDate.getMinutes()).padStart(2, "0")}`;
+
   // 航班/租車有自己的編輯模式：儲存後補填不重新生成（specs/flights-rentals.md §2.5）
   const [editingBookings, setEditingBookings] = useState(false);
   const [flightDrafts, setFlightDrafts] = useState<FlightDraft[]>([]);
@@ -210,6 +228,22 @@ export default function TripViewPage() {
       }
     })();
   }, [user, params.id]);
+
+  // 進頁時（或行程資料到位、算出今天是第幾天後）預設捲動到今天那張卡片並高亮，其他天照常可看。
+  // deps 加 params.id：這個 page.tsx 沒有 template.tsx，App Router 換不同行程 id 時不會自動重掛載
+  // （state 會留存），只用 [tripDay] 在兩個行程剛好算出同一個 tripDay 數值時會誤判成沒變化而不觸發
+  // （自我審查發現，經 Context7 查證 Next.js App Router 的 remount 機制後確認）。
+  useEffect(() => {
+    if (tripDay === null) return;
+    document.getElementById(`day-${tripDay}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [tripDay, params.id]);
+
+  // 今日卡片的地圖 toggle 預設展開（軟依賴 specs/map-view.md）；只在 tripDay 第一次解出時強制加開，
+  // 之後使用者手動收合不會被這裡重新彈開（effect 只在 tripDay/行程 id 改變時觸發一次）。
+  useEffect(() => {
+    if (tripDay === null) return;
+    setMapOpenDays((prev) => (prev.has(tripDay) ? prev : new Set(prev).add(tripDay)));
+  }, [tripDay, params.id]);
 
   function startEdit() {
     if (view.status !== "ready") return;
@@ -463,6 +497,11 @@ export default function TripViewPage() {
           )}
           <div className="mb-4 flex items-start justify-between rounded-lg border border-neutral-200 bg-neutral-50 px-5 py-4">
             <div>
+              {tripDay !== null && (
+                <span className="mb-1 inline-block rounded-full bg-teal-700 px-2.5 py-0.5 text-xs font-medium text-white">
+                  🧭 旅途中 · 第 {tripDay} 天／共 {view.trip.days.length} 天
+                </span>
+              )}
               <h1 className="text-lg font-semibold text-neutral-900">{view.trip.title}</h1>
               <p className="mt-1 text-sm text-neutral-600">{view.trip.summary}</p>
               <div className="mt-2 flex flex-wrap gap-2 text-xs text-neutral-500">
@@ -652,10 +691,35 @@ export default function TripViewPage() {
             const dayMapResolved = mapOpenDays.has(day.day)
               ? resolveDayMapItems(day.schedule, collectionCoords)
               : null;
+            const isToday = day.day === tripDay;
+            const nextStopIdx = isToday ? findNextStopIndex(day.schedule, nowHHMM) : null;
             return (
-            <div key={day.day} className="mb-6 print:break-inside-avoid">
+            <Fragment key={day.day}>
+              {isToday && todayFlights.length > 0 && (
+                <div className="mb-3 rounded-lg border border-teal-200 bg-teal-50 p-3 print:break-inside-avoid">
+                  <h3 className="mb-2 text-xs font-semibold text-teal-800">✈️ 今日航班</h3>
+                  <ul className="space-y-2">
+                    {todayFlights.map((f, i) => (
+                      <li key={i} className="text-sm text-teal-900">
+                        <span className="font-medium">{f.airline ? `${f.airline} ` : ""}{f.flightNo}</span>{" "}
+                        {f.from} → {f.to} <span className="text-teal-700">{f.departTime}–{f.arriveTime}</span>
+                        {f.date && (
+                          <FlightStatusRow flightNo={f.flightNo} date={f.date} departTime={f.departTime} arriveTime={f.arriveTime} />
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            <div
+              id={`day-${day.day}`}
+              className={`mb-6 print:break-inside-avoid ${isToday ? "rounded-lg p-3 ring-2 ring-teal-500" : ""}`}
+            >
               <div className="mb-2 flex flex-wrap items-center gap-2">
                 <h2 className="text-sm font-semibold text-neutral-800">第 {day.day} 天</h2>
+                {isToday && (
+                  <span className="rounded-full bg-teal-100 px-2 py-0.5 text-xs font-medium text-teal-800">今天</span>
+                )}
                 {!editing && (
                   <button
                     onClick={() => toggleDayMap(day.day)}
@@ -737,6 +801,9 @@ export default function TripViewPage() {
                       <p className="text-sm font-medium text-neutral-900">
                         {item.title}
                         <span className="ml-2 text-xs text-neutral-400">{TYPE_LABEL[item.type]}</span>
+                        {i === nextStopIdx && (
+                          <span className="ml-2 rounded-full bg-teal-700 px-2 py-0.5 text-xs font-medium text-white">下一站</span>
+                        )}
                       </p>
                       {item.openingWarning && (
                         <p className="mt-0.5 text-xs font-medium text-amber-600">⚠️ {item.openingWarning}</p>
@@ -769,6 +836,7 @@ export default function TripViewPage() {
                 )}
               </ul>
             </div>
+            </Fragment>
             );
           })}
 

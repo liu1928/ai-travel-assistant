@@ -606,4 +606,45 @@ API 呼叫核對即時追蹤欄位名稱（`status`/`revisedTime`/`terminal`/`ga
 
 `pnpm typecheck` ✅、`pnpm test` **246/246**（新增 10：`generateIcs`）✅、`pnpm lint` ✅、`pnpm build` ✅
 （`/api/trips/[id]/ics` 正確註冊）。
+
+---
+
+# REVIEW — GLM-5.2 異質審查（Trip Day Mode，specs/trip-day-mode.md）
+
+> 時間戳：2026-07-21（八）（Asia/Taipei）
+> 審查範圍：`lib/trip-day.ts`（新）、`app/trips/[id]/page.tsx`（旅途模式：徽章/捲動高亮/今日航班/
+> 下一站/導航升級/地圖預設展開）、`components/bookings.tsx`（`FlightStatusRow` 加 export）、
+> `lib/__tests__/trip-day.test.ts`（新）。diff 見 task/diff.patch。審查者：GLM-5.2。
+>
+> ⚠️ 工具限制：本輪 3 次呼叫（完整 diff、聚焦兩個 `useEffect` 的片段、聚焦 Fragment JSX 結構片段）
+> 全部失敗——1 次壓縮不可讀、2 次 504。已切自我驗證，聚焦送審 prompt 列出的 4 點，其中第 2 點
+> 自我審查時發現是真的問題。
+
+## 聚焦重審（GLM 全數不可用，改主線獨立驗證）
+
+- **`currentTripDay` 用 UTC 解析 client 本地日期字串是否有時區偏差**：`node -e` 實測跨年（12/31→1/1）、
+  跨月（1/28→2/6）邊界，計算結果皆正確。原理跟 `dateForDay`/`daysDiff`（前幾輪已驗證過的既有慣例）
+  相同：兩端都固定轉 UTC 午夜再相減，算的是「日期標籤之間差幾個日曆天」，不是「距離某個瞬間還有
+  幾小時」，因此不受時區/DST 影響，只要兩端一致處理即可，`today` 字串本身已由呼叫端用本地
+  getFullYear/getMonth/getDate 算出，語意正確。
+- **兩個新 `useEffect` 只用 `[tripDay]` 當 deps，同一 session 內從行程 A 切到行程 B、剛好算出同一個
+  tripDay 數值時會不會漏觸發捲動/地圖展開？**：**自我審查確認是真的問題**。用 Context7 查證 Next.js
+  App Router 的重掛載機制：`template.tsx` 才會在動態 segment 變化時強制 remount，一般 `page.tsx`
+  預設不會（`find "app/trips/[id]"` 確認本專案這個路由只有 `page.tsx`，沒有 `template.tsx`），
+  代表元件 state 在同 session 內切換不同行程 id 時會留存，`[tripDay]` 數值恰好相同時 React 會判斷
+  「沒變化」而不重跑 effect。**已修**：兩個 effect 的 deps 都加上 `params.id`，確保切換行程一定
+  觸發，不受 tripDay 數值巧合影響。
+- **`setMapOpenDays` 的 `prev.has(tripDay) ? prev : new Set(prev).add(tripDay)` 判斷邏輯**：
+  讀程式碼確認正確——已存在則回傳同一參照（不觸發多餘 re-render），不存在才建立新 Set（React
+  狀態更新要求新參照才會觸發重渲染），邏輯本身沒有問題，问题只在上一點的 deps 觸發時機。
+- **`Fragment` 包裝 + 兩個相鄰 `<div>` 的 JSX 結構正確性**：`pnpm typecheck` 與 `pnpm build`
+  （Next.js 對 JSX 做完整編譯）都全綠，任何巢狀/語法錯誤都會在這兩關被攔下，非本輪自行猜測，
+  是既有工具鏈已經驗證過的結果。
+
+## 驗證
+
+`pnpm typecheck` ✅、`pnpm test` **261/261**（新增 15：`currentTripDay`/`findNextStopIndex`/
+`todayLocalDateStr`）✅、`pnpm lint` ✅、`pnpm build` ✅。人工瀏覽器實測缺口：需要一筆 `startDate`
+落在今天附近的真實行程才能看到視覺效果，本輪只能靠 build/typecheck/單測驗證邏輯與無執行期錯誤，
+視覺驗收留給 peanut 部署後用真實資料測。
 統計：真且已修 2（NaN 防呆、weather 索引位移守衛）、假/現況不成立 2、刻意設計 3、不修 1、已答 2。
