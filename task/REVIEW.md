@@ -493,4 +493,45 @@ API 呼叫核對即時追蹤欄位名稱（`status`/`revisedTime`/`terminal`/`ga
 
 `pnpm typecheck` ✅、`pnpm test` **224/224**（新增 7：`resolveDayMapItems`）✅、`pnpm lint` ✅、
 `pnpm build` ✅（spec 特別要求：確認無 `window is not defined`，dynamic import + `ssr:false` 生效）。
+
+---
+
+# REVIEW — GLM-5.2 異質審查（Day Regenerate，specs/day-regenerate.md）
+
+> 時間戳：2026-07-21（六）（Asia/Taipei）
+> 審查範圍：`schema/trip.ts`（`daySchedulePayloadSchema`）、`lib/trip-days.ts`（`dateForDay`）、
+> `lib/day-anchor.ts`（新，`anchorDaySchedule`）、`lib/anthropic.ts`（`regenerateDay`）、
+> `lib/quotas.ts`、`app/api/trips/[id]/regenerate-day/route.ts`（新）、`app/trips/[id]/page.tsx`
+> （重排按鈕+回饋輸入）、`lib/__tests__/day-anchor.test.ts`（新）、`lib/__tests__/trip-days.test.ts`
+> （`dateForDay` 補測）。diff 見 task/diff.patch。審查者：GLM-5.2。
+>
+> ⚠️ 工具限制：本輪 3 次呼叫（完整兩檔核心邏輯、聚焦 `updateTrip` 併發片段、聚焦 `otherDaysPlaces`
+> 去重片段）全部回傳被壓縮不可讀。已切自我驗證，聚焦送審 prompt 列出的 4 點。
+
+## 聚焦重審（GLM 全數不可用，改主線獨立驗證）
+
+- **`getTrip`→（AI 呼叫數秒）→`updateTrip` 整份覆寫的併發競態——同一行程兩個不同天同時重生，
+  後完成的請求會用它讀到的舊快照覆蓋掉先完成請求的改動嗎？**：**這正是 spec 本身已經預見並明文
+  接受的設計**，非本輪自己該重新論證的新問題——`specs/day-regenerate.md` §2 原文：「併發：
+  last-write-wins 可接受（單人使用）；rate limit 防連打即可，不做樂觀鎖。」已用 `grep` 核對原文
+  存在。實作忠實遵照 spec 決策，不多做樂觀鎖。
+- **`otherDaysPlaces` 用 `s.location ?? s.title` 當去重 key，同一地點在不同天填法不一致（一次有
+  location 一次沒有）會不會被當成兩個不同地點，讓防重複指令有漏洞？**：真實存在但影響輕微——
+  最壞後果是「已排在其他天」清單裡出現同一地點的兩種寫法，AI 看到的仍是「這個名字已經排過」的
+  正確訊號（只是列了兩行而非一行），不會導致 AI 誤判成「沒排過」而重複排入；只是多耗一點 token，
+  不影響防重複排點的實際效果，記錄為已知限制不修。
+- **`anchorDaySchedule` 對找不到座標的 item 完全不寫 lat/lng，存進 Firestore 後其他功能怎麼處理？**：
+  跟既有全域行為完全一致——`lib/day-map.ts` 的 `resolveDayMapItems`（map-view 那輪）本來就把
+  無座標的 place/food 項目計入 `excludedCount` 排除在地圖外；`anchorDaySchedule` 只在 `known`
+  （收藏對映成功）分支才呼叫 `checkScheduleAgainstHours`，找不到座標的項目自然跳過公休驗證。
+  非新增風險面，是既有降級路徑的自然延伸。
+- **`checkAndConsume(uid, "day_regenerate")` 沒帶第三參數，cost 是否正確對應 0.03？**：
+  `checkAndConsume` 簽章 `cost: number = SERVICE_COST_USD[service]`——TS 預設參數用呼叫時實際傳入
+  的 `service`（"day_regenerate"）求值，等同 `SERVICE_COST_USD.day_regenerate` = 0.03。跟
+  `flight_lookup`/`tagging_batch` 等既有呼叫點是同一個機制，行為正確。
+
+## 驗證
+
+`pnpm typecheck` ✅、`pnpm test` **236/236**（新增 12：`anchorDaySchedule` 7 條 + `dateForDay` 5 條）✅、
+`pnpm lint` ✅、`pnpm build` ✅（`/api/trips/[id]/regenerate-day` 正確註冊）。
 統計：真且已修 2（NaN 防呆、weather 索引位移守衛）、假/現況不成立 2、刻意設計 3、不修 1、已答 2。

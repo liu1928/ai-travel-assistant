@@ -11,6 +11,7 @@ export const SERVICE_COST_USD = {
   flight_lookup: 0.02, // AeroDataBox 一次（免費層約 300 次/月；$ 值只為相對護欄，實際限制在月額度）
   places_status: 0.017, // Places Details（Pro SKU）一次，$17/1K；批次呼叫時乘以筆數傳入
   opening_hours: 0.02, // Places Details（Enterprise SKU）一次，$20/1K；批次呼叫時乘以筆數傳入
+  day_regenerate: 0.03, // 單日重生（Sonnet，輸入~3K+輸出~1.5K），約整趟生成 1/3 以下（specs/day-regenerate.md）
 } as const;
 export type PaidService = keyof typeof SERVICE_COST_USD;
 

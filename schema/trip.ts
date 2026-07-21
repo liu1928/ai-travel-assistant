@@ -20,6 +20,13 @@ export const scheduleItemSchema = z.object({
 });
 export type ScheduleItem = z.infer<typeof scheduleItemSchema>;
 
+// 單日重生的 AI 輸出 schema（specs/day-regenerate.md）：只有 schedule，不含 day 編號
+// （server 端知道是哪天）；用 AI 側 scheduleItemSchema，不含錨定欄位——重生後由 server 重跑錨定。
+export const daySchedulePayloadSchema = z.object({
+  schedule: z.array(scheduleItemSchema).min(1),
+});
+export type DaySchedulePayload = z.infer<typeof daySchedulePayloadSchema>;
+
 export const tripDaySchema = z.object({
   day: z.number().int().positive(),
   schedule: z.array(scheduleItemSchema).min(1, "每天至少要有一個行程"),

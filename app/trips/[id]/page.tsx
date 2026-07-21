@@ -149,6 +149,14 @@ export default function TripViewPage() {
   // 單日路線圖（specs/map-view.md）：哪些天展開地圖 + 舊行程降級用的收藏座標對映（懶載入，全頁共用一次）
   const [mapOpenDays, setMapOpenDays] = useState<Set<number>>(new Set());
   const [collectionCoords, setCollectionCoords] = useState<Map<string, { lat: number; lng: number }> | null>(null);
+  // 單日重生（specs/day-regenerate.md）：哪天展開回饋輸入 + 送出狀態
+  const [regenOpenDay, setRegenOpenDay] = useState<number | null>(null);
+  const [regenFeedback, setRegenFeedback] = useState("");
+  const [regenState, setRegenState] = useState<
+    | { status: "idle" }
+    | { status: "running"; day: number }
+    | { status: "error"; day: number; message: string }
+  >({ status: "idle" });
   const [saveError, setSaveError] = useState<string | null>(null);
 
   // 航班/租車有自己的編輯模式：儲存後補填不重新生成（specs/flights-rentals.md §2.5）
@@ -222,6 +230,26 @@ export default function TripViewPage() {
       setCollectionCoords(map);
     } catch {
       setCollectionCoords(new Map()); // 失敗也設空 map，避免每次展開都重打；地圖走「排除」路徑降級
+    }
+  }
+
+  // 單日重生（specs/day-regenerate.md）：失敗不動 Firestore/畫面，成功以回傳整份 trip 更新 state。
+  async function submitRegenerateDay(day: number) {
+    setRegenState({ status: "running", day });
+    try {
+      const res = await authedFetch(`/api/trips/${params.id}/regenerate-day`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ day, feedback: regenFeedback.trim() || undefined }),
+      });
+      const data = (await res.json()) as { trip?: SavedTrip; error?: string };
+      if (!res.ok || !data.trip) throw new Error(data.error ?? "重新編排失敗");
+      setView({ status: "ready", trip: data.trip });
+      setRegenOpenDay(null);
+      setRegenFeedback("");
+      setRegenState({ status: "idle" });
+    } catch (e) {
+      setRegenState({ status: "error", day, message: e instanceof Error ? e.message : "重新編排失敗" });
     }
   }
 
@@ -591,6 +619,17 @@ export default function TripViewPage() {
                     {mapOpenDays.has(day.day) ? "收合地圖" : "🗺️ 地圖"}
                   </button>
                 )}
+                {!editing && (
+                  <button
+                    onClick={() => {
+                      setRegenOpenDay(regenOpenDay === day.day ? null : day.day);
+                      setRegenFeedback("");
+                    }}
+                    className="rounded-full border border-neutral-300 px-2 py-0.5 text-xs text-neutral-600 hover:bg-neutral-50"
+                  >
+                    {regenOpenDay === day.day ? "取消重排" : "🔄 重排這一天"}
+                  </button>
+                )}
                 {dayWeather && (
                   <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2 py-0.5 text-xs text-sky-700 ring-1 ring-sky-100">
                     <span>{weatherEmoji(dayWeather.description)}</span>
@@ -611,6 +650,37 @@ export default function TripViewPage() {
                     <p className="mt-1 text-xs text-neutral-400">
                       {dayMapResolved.excludedCount} 個項目無座標，未顯示
                     </p>
+                  )}
+                </div>
+              )}
+              {regenOpenDay === day.day && (
+                <div className="mb-3 rounded-lg border border-neutral-200 bg-neutral-50 p-3">
+                  <textarea
+                    value={regenFeedback}
+                    onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setRegenFeedback(e.target.value)}
+                    maxLength={200}
+                    rows={2}
+                    placeholder="例：下午太趕，想多留咖啡時間（留空＝直接換一批不同排程）"
+                    disabled={regenState.status === "running" && regenState.day === day.day}
+                    className="w-full rounded-md border border-neutral-300 px-2.5 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-teal-500 disabled:opacity-50"
+                  />
+                  <div className="mt-2 flex items-center gap-2">
+                    <button
+                      onClick={() => void submitRegenerateDay(day.day)}
+                      disabled={regenState.status === "running" && regenState.day === day.day}
+                      className="rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-teal-800 disabled:opacity-40"
+                    >
+                      {regenState.status === "running" && regenState.day === day.day ? "重新編排中…" : "送出"}
+                    </button>
+                    <button
+                      onClick={() => { setRegenOpenDay(null); setRegenFeedback(""); }}
+                      className="text-xs text-neutral-400 hover:text-neutral-700"
+                    >
+                      取消
+                    </button>
+                  </div>
+                  {regenState.status === "error" && regenState.day === day.day && (
+                    <p className="mt-2 text-xs text-red-600">{regenState.message}</p>
                   )}
                 </div>
               )}

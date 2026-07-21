@@ -7,6 +7,7 @@ import {
   expectedDayForWeekday,
   checkWeekdayTimeSignal,
   weekdayForDay,
+  dateForDay,
 } from "@/lib/trip-days";
 
 /**
@@ -201,6 +202,28 @@ describe("weekdayForDay — day N 對應星期幾（specs/opening-hours.md）", 
 
   it("startDate 格式不合 → undefined", () => {
     expect(weekdayForDay("not-a-date", 1)).toBeUndefined();
+  });
+});
+
+describe("dateForDay — day N 對應實際日期（specs/day-regenerate.md）", () => {
+  it("day 1 = startDate 本身", () => {
+    expect(dateForDay("2026-07-13", 1)).toBe("2026-07-13");
+  });
+
+  it("依序遞增", () => {
+    expect(dateForDay("2026-07-13", 3)).toBe("2026-07-15");
+  });
+
+  it("跨月正確進位", () => {
+    expect(dateForDay("2026-07-30", 3)).toBe("2026-08-01");
+  });
+
+  it("跨年正確進位", () => {
+    expect(dateForDay("2026-12-30", 3)).toBe("2027-01-01");
+  });
+
+  it("startDate 格式不合 → undefined", () => {
+    expect(dateForDay("not-a-date", 1)).toBeUndefined();
   });
 });
 

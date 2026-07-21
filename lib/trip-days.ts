@@ -144,6 +144,18 @@ export function weekdayForDay(startDate: string, day: number): number | undefine
 }
 
 /**
+ * day N（1-based）對應的實際日期（YYYY-MM-DD），以 startDate 為 day 1 錨點推算。
+ * 固定用 UTC 午夜運算（同 lib/aerodatabox.ts 的 daysDiff），避免時區/DST 造成日期算錯；
+ * startDate 格式不合回 undefined（specs/day-regenerate.md：比對 weather/flights/lodgings 用）。
+ */
+export function dateForDay(startDate: string, day: number): string | undefined {
+  const d = new Date(`${startDate}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return undefined;
+  d.setUTCDate(d.getUTCDate() + (day - 1));
+  return d.toISOString().slice(0, 10);
+}
+
+/**
  * 驗證使用者提到的星期幾（換算成 expectedDay）在生成結果中確實存在；若同時提到時段，
  * 該天要有至少一項行程的 time 落在對應時間窗。expectedDay 為 undefined（沒提到星期幾，
  * 或沒有 startDate 錨點算不出）時視為不適用、直接放行——這是本檢查刻意的保守範圍：

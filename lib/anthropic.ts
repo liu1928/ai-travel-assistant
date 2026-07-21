@@ -1,7 +1,17 @@
 // ⚠️ 伺服器端專用
 import Anthropic, { AnthropicError } from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
-import { tripSchema, type Trip, type TripStyle, type Flight, type CarRental, type Lodging } from "@/schema/trip";
+import {
+  tripSchema,
+  daySchedulePayloadSchema,
+  type Trip,
+  type TripStyle,
+  type TripBudget,
+  type ScheduleItem,
+  type Flight,
+  type CarRental,
+  type Lodging,
+} from "@/schema/trip";
 import type { SavedPlace } from "@/schema/place";
 import type { TravelDna } from "./travel-dna"; // type-only：無 runtime 循環依賴
 import { ok, err, type Result } from "./result";
@@ -525,4 +535,130 @@ export async function generateTrip(
   }
   // for 迴圈兩輪內必定 return；此行只為 TS 完備性
   return err({ kind: "refusal", stopReason: "unreachable" });
+}
+
+// --- 單日重生（specs/day-regenerate.md）---
+// 只回傳 schedule，不讓模型碰 day 編號/title/summary/insights：範圍越小越不會把別的東西改壞。
+
+export type RegenerateDayInput = {
+  tripSummary: { title: string; location: string; style: TripStyle; summary: string; budget: TripBudget };
+  otherDaysPlaces: string[]; // 已排在其他天的地點名稱（去重），防重複排點的關鍵
+  currentSchedule: ScheduleItem[]; // 該日現有排程，讓模型知道使用者不滿意的基準
+  feedback?: string; // 使用者一句話回饋（≤200 字），可空＝「換一批」
+  dayDate?: string; // YYYY-MM-DD；無 startDate 時 undefined，略過日期/星期幾段落
+  weekday?: number; // 0-6，同上
+  dayWeather?: DailyWeather; // 以日期比對取得的該日天氣快照
+  dayFlights?: Flight[]; // 當日相關航班（留接送機時間）
+  dayLodgings?: Lodging[]; // 當日相關住宿
+};
+
+function buildRegenerateDayMessage(input: RegenerateDayInput): string {
+  const parts: string[] = [];
+  const { tripSummary } = input;
+
+  parts.push(
+    `旅程：${tripSummary.title}（${tripSummary.location}，風格：${tripSummary.style}）\n${tripSummary.summary}\n` +
+      `預算範圍：${tripSummary.budget.min} ~ ${tripSummary.budget.max} 元`,
+  );
+
+  if (input.otherDaysPlaces.length > 0) {
+    parts.push(
+      `以下地點已排在其他天：\n${input.otherDaysPlaces.map((p) => `- ${p}`).join("\n")}\n` +
+        `除非使用者回饋明確要求，不要重複排入這些地點。`,
+    );
+  }
+
+  const currentLines = input.currentSchedule
+    .map((s) => `- ${s.time} ${s.title}（${s.type}）：${s.description}`)
+    .join("\n");
+  parts.push(`這一天目前的排程（使用者不滿意，需要重新編排）：\n${currentLines}`);
+
+  if (input.dayDate) {
+    const weekdayLabel = input.weekday !== undefined ? `（週${WEEKDAY_LABEL[input.weekday]}）` : "";
+    parts.push(`這一天的日期：${input.dayDate}${weekdayLabel}`);
+  }
+  if (input.dayWeather) {
+    parts.push(
+      `這一天的天氣：${input.dayWeather.description}，` +
+        `${input.dayWeather.minTempC}–${input.dayWeather.maxTempC}°C，降雨 ${input.dayWeather.precipitationMm}mm`,
+    );
+  }
+  if (input.dayFlights && input.dayFlights.length > 0) {
+    const lines = input.dayFlights.map((f) => `- ${f.flightNo} ${f.from}→${f.to} ${f.departTime}–${f.arriveTime}`);
+    parts.push(`這一天有航班，排程要留接送機時間：\n${lines.join("\n")}`);
+  }
+  if (input.dayLodgings && input.dayLodgings.length > 0) {
+    parts.push(`這一天相關住宿：\n${input.dayLodgings.map((l) => `- ${l.name}`).join("\n")}`);
+  }
+
+  if (input.feedback && input.feedback.trim()) {
+    parts.push(`使用者回饋：${input.feedback.trim()}\n請針對這個回饋調整排程。`);
+  } else {
+    parts.push(`使用者沒有提供具體回饋，只是想要換一批不同的排程——請重新編排並提供不同的選點組合，避免跟原排程雷同。`);
+  }
+
+  parts.push(`只需要輸出這一天的 schedule（不含 day 編號），time 從合理的時間開始、涵蓋一整天的節奏。`);
+  return parts.join("\n\n");
+}
+
+class DayScheduleParseError extends AnthropicError {}
+
+const dayScheduleOutputFormat = (() => {
+  const base = zodOutputFormat(daySchedulePayloadSchema);
+  return {
+    ...base,
+    parse(content: string) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(content);
+      } catch (e) {
+        throw new DayScheduleParseError(
+          `Failed to parse structured output as JSON: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+
+      const result = daySchedulePayloadSchema.safeParse(normalizeTimesInObject(parsed));
+      if (!result.success) {
+        const issues = result.error.issues
+          .slice(0, 3)
+          .map((i) => `${i.path.join(".")}: ${i.message}`)
+          .join("; ");
+        throw new DayScheduleParseError(`排程格式有誤：${issues}`);
+      }
+      return result.data;
+    },
+  };
+})();
+
+export async function regenerateDay(
+  input: RegenerateDayInput,
+): Promise<Result<ScheduleItem[], GenerateTripError>> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return err({ kind: "missing_key" });
+
+  const client = new Anthropic({ apiKey });
+  const userMessage = buildRegenerateDayMessage(input);
+
+  try {
+    const message = await client.messages.parse({
+      model: MODEL,
+      max_tokens: 4096, // 整趟生成下限 8192 的 1/2（spec：約 1/3 即足，留緩衝）
+      system: SYSTEM_PROMPT,
+      messages: [{ role: "user", content: userMessage }],
+      output_config: { format: dayScheduleOutputFormat },
+    });
+
+    if (message.stop_reason !== "end_turn") {
+      return err({ kind: "refusal", stopReason: message.stop_reason });
+    }
+    if (!message.parsed_output) {
+      return err({ kind: "refusal", stopReason: "no_parsed_output" });
+    }
+    return ok(message.parsed_output.schedule);
+  } catch (e) {
+    if (e instanceof DayScheduleParseError) {
+      return err({ kind: "refusal", stopReason: e.message });
+    }
+    return err({ kind: "api_error", message: e instanceof Error ? e.message : String(e) });
+  }
 }
