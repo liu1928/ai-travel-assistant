@@ -380,3 +380,25 @@ schedule-anchoring 全滅、place-freshness 成功、opening-hours 全滅、flig
 一定要在 PLAN.md 寫清楚為什麼，不要無聲地選擇「安全」的那條路而不留紀錄**——不然下一輪的人（或
 未來的自己）看到兩處相似程式碼，可能會誤以為是疏漏而去「修正」成重複呼叫，反而引入原本要避免的
 迴歸風險。
+
+---
+
+## 2026-07-21（七）：Export & Offline——沒有影像生成工具時的 PWA icon 替代方案
+
+**環境限制的誠實替代方案**：spec 要求 PWA icon 產 192/512 PNG 兩檔，但這個環境沒有影像生成工具，
+手刻 PNG 二進位編碼器（IHDR/IDAT/CRC32）風險高且沒有圖檢視工具能立即發現壞圖。改用單一 SVG 檔案
+在 manifest 宣告兩個 sizes 條目——**這不是偷懶跳過，是在 PLAN.md 明確記錄的替代方案**，附上「peanut
+之後可換真正品牌 PNG，manifest 結構不用改」的銜接說明。教訓：遇到「這個環境做不到 spec 字面要求」
+的情況，不要嘗試用高風險的臨時方案硬做到位（PNG 手刻編碼器一旦有 bug 就是靜默壞圖，沒工具能發現），
+找一個功能等價、風險可控的替代方案，誠實記錄偏差比硬做更負責任。
+
+**GLM review 這輪兩批都完整成功——確認之前「連續失敗」不是趨勢**：前 4 輪（schedule-anchoring/
+opening-hours/flight-day-status/map-view/day-regenerate）大多全滅，這輪兩批都一次成功。7 輪累計
+2 成功 5 全滅，**確認失敗率高但完全不可預測，不是「越來越糟」或「某個時段容易失敗」這種可操作的
+規律**。已更新跨 session 記憶，把這個結論明確記下來，避免下次又重新猜測規律浪費時間。
+
+**Next.js metadata.themeColor 已棄用，用 Context7 查證後才改**：原本直接寫 `metadata.themeColor`
+（憑舊印象），Context7 查 Next.js 官方文件才發現 v14 起要移到獨立 `viewport` export。**教訓：連
+「這行程式碼感覺很眼熟」的 API 用法都可能是舊版本記憶，Next.js/React 生態這類 metadata/config API
+變動頻繁，落筆前查一次 Context7 比事後被 typecheck 或 runtime warning 抓到更省事**——這次是自己
+主動查證，不是被逼著查，值得繼續保持。

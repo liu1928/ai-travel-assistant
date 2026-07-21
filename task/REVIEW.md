@@ -534,4 +534,76 @@ API 呼叫核對即時追蹤欄位名稱（`status`/`revisedTime`/`terminal`/`ga
 
 `pnpm typecheck` ✅、`pnpm test` **236/236**（新增 12：`anchorDaySchedule` 7 條 + `dateForDay` 5 條）✅、
 `pnpm lint` ✅、`pnpm build` ✅（`/api/trips/[id]/regenerate-day` 正確註冊）。
+
+---
+
+# REVIEW — GLM-5.2 異質審查（Export & Offline，specs/export-offline.md）
+
+> 時間戳：2026-07-21（七）（Asia/Taipei）
+> 審查範圍：`lib/ics.ts`（新）、`public/sw.js`（新）、`app/api/trips/[id]/ics/route.ts`（新）、
+> `components/sw-register.tsx`（新）、`app/layout.tsx`、`app/trips/[id]/page.tsx`（匯出/列印/離線）、
+> `lib/__tests__/ics.test.ts`（新）、`public/manifest.webmanifest`、`public/icon.svg`。
+> diff 見 task/diff.patch。審查者：GLM-5.2（MCP `glm-reviewer.review_code`）。
+> **本輪罕見地兩批呼叫都取得完整可讀全文**（連續多輪不穩定後的正向資料點，已更新
+> [[glm-review-tool-issues]]）。分兩批送審：批 1（`lib/ics.ts` + `public/sw.js` 核心邏輯）、
+> 批 2（route/元件/page.tsx 整合片段）。
+
+## 批 1：`lib/ics.ts` + `public/sw.js`
+
+### 🐛 問題點
+1. `toIcsLocal` 依賴 `Date.UTC` 對負數/溢位 day 參數的隱式正規化，可讀性差
+2. `sw.js` network-first 分支 `cache.put` 的 floating promise 沒有 `.catch()`，可能產生 unhandled rejection
+3. `sw.js` cache-first（app shell）分支的 `fetch` 失敗沒有 `.catch()`
+
+### ⚠️ 風險
+1. `foldLine` 對區域指示符旗幟 emoji（多個 code point 組成）可能在視覺上被拆開到兩行（RFC 5545 位元組摺行本身沒錯，只是拆開視覺完整性）
+2. cross-origin GET 請求的攔截疑慮（自我確認後排除）
+3. `escapeText` 缺型別/undefined 防呆
+4. `isTripsApiGet` 正則被懷疑不匹配帶 query string 的 URL
+
+### 💡 建議 / ❓ 待釐清
+`toIcsLocal` 改用 `setUTCDate` 顯式表達；兩處 floating promise 加 `.catch()`；addMinutes 範圍是否只會是正數；`isTripsApiGet` 排除 query string 是否為設計決策。
+
+## 批 1 仲裁
+
+| 類別 | Finding | 判定 | 依據 / 處置 |
+|---|---|---|---|
+| 🐛 | `Date.UTC` 隱式正規化可讀性差 | **真（風格）已修** | 改用 `Date.UTC(y,m-1,d)` + `setUTCDate(+dayOverflow)` 顯式表達，行為不變（`node -e` 實測 day=0/負數/月=0 三種邊界，`Date.UTC` 原本就正確跨月跨年，此為純可讀性改善）。 |
+| 🐛 | `cache.put` floating promise 無 catch | **真已修** | 兩處（network-first API 分支、cache-first shell 分支）都加 `.catch(() => {})`，靜默處理寫入快取失敗。 |
+| 🐛 | app shell fetch 失敗無 catch | **真（部分）已修** | 加 `.catch(() => Response.error())` 避免 unhandled rejection；**不做**自訂離線 fallback 頁面——spec 範圍明確限縮成「已開過的行程可離線看」，離線又從未快取過的頁面交還瀏覽器原生離線頁，屬刻意的範圍限縮，已加註解說明。 |
+| ⚠️ | 旗幟 emoji 摺行視覺拆開 | **真但極低機率／不修** | RFC 5545 允許純位元組摺行，接收端 unfold 後內容仍完整還原、不會資料損毀；旗幟 emoji 出現在行程描述文字的機率極低，不成比例修正。 |
+| ⚠️ | cross-origin GET 誤攔截 | **自查後排除** | 攔截條件都先檢查 `url.origin === self.location.origin`，第三方請求（Google Maps 等）不受影響。 |
+| ⚠️ | `escapeText` 缺 undefined 防呆 | **假** | 所有呼叫點在呼叫前都已判斷（`if (extra?.description)` 才呼叫、`summary` 參數型別非 optional），程式碼閱讀確認不會有 undefined 打進去。 |
+| ⚠️ | `isTripsApiGet` 不匹配 query string | **假（已驗證）** | `node -e` 實測 `new URL(...).pathname` 本來就不含 query string（`?limit=10` 不影響 `.pathname` 值），正則測的是已經去除 query 的路徑，match 正確。 |
+| 💡 | `setUTCDate` 顯式表達 | **採納已修** | 同上。 |
+| 💡 | 兩處加 `.catch()` | **採納已修** | 同上。 |
+| ❓ | addMinutes 是否只會正數 | **已答** | 現況呼叫點確實都是 0 或正數（`durationMin` schema 驗證 `positive()`），負數分支目前是無害的防禦性程式碼，不影響正確性。 |
+| ❓ | query string 排除是設計還是遺漏 | **已答** | 兩者皆非——`.pathname` 本來就不含 query，無需特別排除或處理。 |
+
+## 批 2：route/元件/page.tsx 整合
+
+### 🐛 問題點
+`exportIcs` 的 `URL.revokeObjectURL` 呼叫時機過早（部分瀏覽器可能在下載真正開始前撤銷，導致空檔/失敗）；`<a>` 元素未掛進 DOM 就 `click()`（部分瀏覽器相容性風險）。
+
+### ⚠️ 風險
+`navigator.onLine` 誤判風險（只測網路介面連線，測不出實際可達性）；SW 註冊失敗被靜默吞掉，未來排查困難。
+
+### ❓ 待釐清
+`requireUid` 型別窄化是否正確（無法看到實作）；ICS 檔名寫死 "trip.ics" 是否為疏漏。
+
+## 批 2 仲裁
+
+| 類別 | Finding | 判定 | 依據 / 處置 |
+|---|---|---|---|
+| 🐛 | `revokeObjectURL` 過早撤銷 | **真已修** | 改成 `setTimeout(() => URL.revokeObjectURL(url), 1000)`，給瀏覽器時間先讀 blob。 |
+| 🐛 | `<a>` 未掛 DOM 就 click | **真已修** | 加 `document.body.appendChild(a)` → `click()` → `a.remove()`，提升跨瀏覽器相容性。 |
+| ⚠️ | `navigator.onLine` 誤判 | **真（既有限制）／記錄不修** | 這是瀏覽器 API 本身的固有限制（測介面連線非實際可達性），要精確判斷需額外打健康檢查端點，跟 spec「手寫最小」的精神不成比例，記錄為已知限制。 |
+| ⚠️ | SW 註冊失敗靜默吞掉 | **真已修** | catch 內加 `console.error`，維持 fail-open（不影響一般使用）但保留除錯線索。 |
+| ❓ | `requireUid` 型別窄化 | **已答** | 跟本專案其他所有 route 完全相同的 Result pattern 用法（`if(!auth.ok) return...; auth.value`），`pnpm typecheck` 全綠即是型別窄化正確的證明，非本檔案獨有疑慮。 |
+| ❓ | ICS 檔名寫死 | **已答** | 精確對應 spec 1.a 原文「filename="trip.ics"」，非疏漏是照 spec 實作；動態檔名屬未來優化，未在本輪範圍。 |
+
+## 驗證
+
+`pnpm typecheck` ✅、`pnpm test` **246/246**（新增 10：`generateIcs`）✅、`pnpm lint` ✅、`pnpm build` ✅
+（`/api/trips/[id]/ics` 正確註冊）。
 統計：真且已修 2（NaN 防呆、weather 索引位移守衛）、假/現況不成立 2、刻意設計 3、不修 1、已答 2。

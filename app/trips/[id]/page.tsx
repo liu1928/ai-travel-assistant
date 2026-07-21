@@ -158,6 +158,8 @@ export default function TripViewPage() {
     | { status: "error"; day: number; message: string }
   >({ status: "idle" });
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [icsError, setIcsError] = useState<string | null>(null);
+  const [offlineBanner, setOfflineBanner] = useState(false);
 
   // 航班/租車有自己的編輯模式：儲存後補填不重新生成（specs/flights-rentals.md §2.5）
   const [editingBookings, setEditingBookings] = useState(false);
@@ -195,8 +197,16 @@ export default function TripViewPage() {
         const data = (await res.json()) as { trip?: SavedTrip; error?: string };
         if (!res.ok || !data.trip) throw new Error(data.error ?? "讀取失敗");
         setView({ status: "ready", trip: data.trip });
+        // 離線時能讀到資料代表是 service worker 的 cache fallback（specs/export-offline.md §c
+        // 故障模式：「fallback cache 無標示」），提示使用者這不一定是最新資料。
+        setOfflineBanner(!navigator.onLine);
       } catch (e) {
-        setView({ status: "error", message: e instanceof Error ? e.message : "讀取失敗" });
+        const message = !navigator.onLine
+          ? "目前離線，且尚未瀏覽過此行程，無法離線查看"
+          : e instanceof Error
+            ? e.message
+            : "讀取失敗";
+        setView({ status: "error", message });
       }
     })();
   }, [user, params.id]);
@@ -380,6 +390,29 @@ export default function TripViewPage() {
     }
   }
 
+  // GET 需要帶 auth header（authedFetch），不能用裸連結下載，改走 blob + 暫時 object URL 觸發下載。
+  async function exportIcs() {
+    if (view.status !== "ready") return;
+    setIcsError(null);
+    try {
+      const res = await authedFetch(`/api/trips/${view.trip.id}/ics`);
+      if (!res.ok) throw new Error("匯出失敗");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "trip.ics";
+      // 掛進 DOM 再點擊（部分瀏覽器對未掛載元素的下載觸發不穩定）；延遲撤銷 object URL，
+      // 避免瀏覽器還沒真正開始讀取 blob 資料就被撤銷導致下載失敗/空檔（GLM REVIEW）。
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      setIcsError(e instanceof Error ? e.message : "匯出失敗");
+    }
+  }
+
   if (loading) {
     return <main className="flex min-h-screen items-center justify-center text-sm text-neutral-400">載入中…</main>;
   }
@@ -394,7 +427,7 @@ export default function TripViewPage() {
 
   return (
     <main className="mx-auto max-w-2xl px-5 py-12">
-      <div className="mb-8 flex items-center justify-between">
+      <div className="mb-8 flex items-center justify-between print:hidden">
         <Link href="/trips" className="text-sm text-neutral-400 hover:text-neutral-700 transition-colors">← 返回行程列表</Link>
         {view.status === "ready" && (
           <div className="flex items-center gap-4">
@@ -423,6 +456,11 @@ export default function TripViewPage() {
 
       {view.status === "ready" && (
         <>
+          {offlineBanner && (
+            <p className="mb-4 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 print:hidden">
+              📴 離線資料，可能非最新
+            </p>
+          )}
           <div className="mb-4 flex items-start justify-between rounded-lg border border-neutral-200 bg-neutral-50 px-5 py-4">
             <div>
               <h1 className="text-lg font-semibold text-neutral-900">{view.trip.title}</h1>
@@ -452,11 +490,18 @@ export default function TripViewPage() {
                 )}
               </div>
             </div>
-            <div className="flex shrink-0 flex-col items-end gap-2">
+            <div className="flex shrink-0 flex-col items-end gap-2 print:hidden">
               {!editing && (
                 <button onClick={startEdit} className="text-xs text-teal-700 hover:text-teal-900">編輯</button>
               )}
+              <button onClick={() => void exportIcs()} className="text-xs text-teal-700 hover:text-teal-900">
+                匯出行事曆 (.ics)
+              </button>
+              <button onClick={() => window.print()} className="text-xs text-teal-700 hover:text-teal-900">
+                列印 / 存 PDF
+              </button>
               <button onClick={() => void handleDelete()} className="text-xs text-neutral-400 hover:text-red-600">刪除</button>
+              {icsError && <p className="text-xs text-red-600">{icsError}</p>}
             </div>
           </div>
 
@@ -470,7 +515,7 @@ export default function TripViewPage() {
                 />
                 <button
                   onClick={startBookingsEdit}
-                  className="text-xs text-teal-700 hover:text-teal-900"
+                  className="text-xs text-teal-700 hover:text-teal-900 print:hidden"
                 >
                   {(view.trip.flights?.length ?? 0) > 0 ||
                   (view.trip.carRentals?.length ?? 0) > 0 ||
@@ -515,7 +560,7 @@ export default function TripViewPage() {
           </div>
 
           {/* 住宿建議 */}
-          <div className="mb-6 rounded-lg border border-neutral-200 p-4">
+          <div className="mb-6 rounded-lg border border-neutral-200 p-4 print:hidden">
             <div className="mb-2 flex items-center justify-between gap-2">
               <h3 className="text-sm font-semibold text-neutral-800">🏨 住宿建議</h3>
               <a
@@ -608,13 +653,13 @@ export default function TripViewPage() {
               ? resolveDayMapItems(day.schedule, collectionCoords)
               : null;
             return (
-            <div key={day.day} className="mb-6">
+            <div key={day.day} className="mb-6 print:break-inside-avoid">
               <div className="mb-2 flex flex-wrap items-center gap-2">
                 <h2 className="text-sm font-semibold text-neutral-800">第 {day.day} 天</h2>
                 {!editing && (
                   <button
                     onClick={() => toggleDayMap(day.day)}
-                    className="rounded-full border border-neutral-300 px-2 py-0.5 text-xs text-neutral-600 hover:bg-neutral-50"
+                    className="rounded-full border border-neutral-300 px-2 py-0.5 text-xs text-neutral-600 hover:bg-neutral-50 print:hidden"
                   >
                     {mapOpenDays.has(day.day) ? "收合地圖" : "🗺️ 地圖"}
                   </button>
@@ -625,7 +670,7 @@ export default function TripViewPage() {
                       setRegenOpenDay(regenOpenDay === day.day ? null : day.day);
                       setRegenFeedback("");
                     }}
-                    className="rounded-full border border-neutral-300 px-2 py-0.5 text-xs text-neutral-600 hover:bg-neutral-50"
+                    className="rounded-full border border-neutral-300 px-2 py-0.5 text-xs text-neutral-600 hover:bg-neutral-50 print:hidden"
                   >
                     {regenOpenDay === day.day ? "取消重排" : "🔄 重排這一天"}
                   </button>
@@ -644,7 +689,7 @@ export default function TripViewPage() {
                 )}
               </div>
               {dayMapResolved && (
-                <div className="mb-3">
+                <div className="mb-3 print:hidden">
                   <DayRouteMap items={dayMapResolved.items} />
                   {dayMapResolved.excludedCount > 0 && (
                     <p className="mt-1 text-xs text-neutral-400">
@@ -654,7 +699,7 @@ export default function TripViewPage() {
                 </div>
               )}
               {regenOpenDay === day.day && (
-                <div className="mb-3 rounded-lg border border-neutral-200 bg-neutral-50 p-3">
+                <div className="mb-3 rounded-lg border border-neutral-200 bg-neutral-50 p-3 print:hidden">
                   <textarea
                     value={regenFeedback}
                     onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setRegenFeedback(e.target.value)}
@@ -702,14 +747,14 @@ export default function TripViewPage() {
                           href={navUrl(item)}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="mt-1 inline-block text-xs text-teal-700 hover:text-teal-900"
+                          className="mt-1 inline-block text-xs text-teal-700 hover:text-teal-900 print:hidden"
                         >
                           🧭 導航
                         </a>
                       )}
                     </div>
                     {editing && (
-                      <div className="flex shrink-0 items-start gap-1">
+                      <div className="flex shrink-0 items-start gap-1 print:hidden">
                         <button onClick={() => moveItem(dayIdx, i, -1)} disabled={i === 0} className="text-xs text-neutral-400 hover:text-neutral-700 disabled:opacity-30">↑</button>
                         <button onClick={() => moveItem(dayIdx, i, 1)} disabled={i === day.schedule.length - 1} className="text-xs text-neutral-400 hover:text-neutral-700 disabled:opacity-30">↓</button>
                         <button onClick={() => removeItem(dayIdx, i)} className="text-xs text-neutral-400 hover:text-red-600">✕</button>
