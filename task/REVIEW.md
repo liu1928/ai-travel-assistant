@@ -454,4 +454,43 @@ tsc ✅、eslint ✅、vitest **169/169**（新增 5：weather/exchangeRate sche
 `pnpm typecheck` ✅、`pnpm test` **217/217**（新增 5：pickFlight 即時欄位 2 條 + daysDiff 3 條）✅、
 `pnpm lint` ✅、`pnpm build` ✅。額外：`GET https://aerodatabox.../flights/number/BR198/{today}` 真實
 API 呼叫核對即時追蹤欄位名稱（`status`/`revisedTime`/`terminal`/`gate`），非憑文件猜測。
+
+---
+
+# REVIEW — GLM-5.2 異質審查（Map View，specs/map-view.md）
+
+> 時間戳：2026-07-21（五）（Asia/Taipei）
+> 審查範圍：`components/collection-map.tsx`（新）、`components/day-route-map.tsx`（新）、
+> `lib/day-map.ts`（新，`resolveDayMapItems`）、`app/page.tsx`（清單/地圖切換）、
+> `app/trips/[id]/page.tsx`（每天地圖 toggle）、`lib/__tests__/day-map.test.ts`（新）、`package.json`
+> （leaflet/react-leaflet/@types/leaflet）。diff 見 task/diff.patch。審查者：GLM-5.2。
+>
+> ⚠️ 工具限制：本輪 3 次呼叫（完整程式碼、聚焦 `FitBounds`/`resolveDayMapItems` 片段、
+> 最小化到單行的 `Map.get` 片段）全部回傳被壓縮不可讀。已切自我驗證，聚焦送審 prompt 列出的 4 點。
+
+## 聚焦重審（GLM 全數不可用，改主線獨立驗證）
+
+- **`resolveDayMapItems` 用 `Map.get(location ?? title)` 對映，同名地點會選錯座標？**：真實存在但非本
+  spec 引入的新風險——`app/api/trip/generate/route.ts` 既有的 `placeByName = new Map(places.map(p =>
+  [p.name, p]))`（schedule-anchoring 那輪）本來就是同一種「後蓋前」名稱對映模式；task/SPEC.md §9
+  已記錄「`resolveCoordinates` 用名稱模糊比對，非 place_id 精確對應」為既有已知限制。本 spec 只是在
+  UI 呈現層重用同一種降級手法，非新增風險面，記錄為已知限制不修。
+- **`loadCollectionCoords` 用 `place.name` 建 Map，同名地點後蓋前**：同上，同一根因、同一判定。
+- **`FitBounds` 的 `useEffect([points, map])` 依賴陣列——`points`/`bounds` 是父層每次 render 都重新
+  算出的新陣列參照，是否導致每次無關的頁面重render 都重跑 `fitBounds`，甚至蓋掉使用者手動平移過的
+  視野？**：**自我審查抓到這是真的 bug**（GLM 沒機會確認，因為 3 次呼叫全部失敗）。追蹤到
+  `app/trips/[id]/page.tsx` 的 `dayMapResolved = resolveDayMapItems(...)` 是在 render body 內聯計算、
+  沒有 `useMemo`，`DayRouteMap` 的 `items` prop 因此每次 `TripViewPage` render 都是新陣列——編輯別天
+  備註這類無關 state 變動都會讓已開啟的地圖被重置視野。**已修**：`day-route-map.tsx`/`collection-map.tsx`
+  的 `FitBounds` 改成空 deps `[]`，只在掛載時設定「初始視野」（呼應 spec 原文用詞），並加 WHY 註解 +
+  `eslint-disable-next-line react-hooks/exhaustive-deps`。`collection-map.tsx` 目前呼叫端 `places` 其實
+  參照穩定（來自 `useState`，非每次重算），這條非必要但同步修，防未來改動誤踩同一坑。
+- **`numberedIcon` 用字串樣板組 `divIcon` 的 `html`，插入的 `n` 有無 XSS 疑慮？**：`n` 是 `items.map((it,i)
+  => ...)` 的陣列索引 `i+1`，保證是內部產生的整數，非任何使用者輸入字串；popup 內容用 JSX
+  `{it.time} {it.title}` 走 React 文字節點自動跳脫，非插入 raw HTML。兩處都無 XSS 風險。
+
+## 驗證
+
+`pnpm typecheck` ✅、`pnpm test` **224/224**（新增 7：`resolveDayMapItems`）✅、`pnpm lint` ✅、
+`pnpm build` ✅（spec 特別要求：確認無 `window is not defined`，dynamic import + `ssr:false` 生效）。
 統計：真且已修 2（NaN 防呆、weather 索引位移守衛）、假/現況不成立 2、刻意設計 3、不修 1、已答 2。

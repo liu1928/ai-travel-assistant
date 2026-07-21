@@ -2,9 +2,11 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
 import { useAuth, authedFetch } from "@/lib/use-auth";
 import { GoogleSignInButton } from "@/components/google-signin";
+import { resolveDayMapItems } from "@/lib/day-map";
 import type { Flight, CarRental, Lodging, DailyWeather, ExchangeRate } from "@/schema/trip";
 import { buildLodgingLink } from "@/lib/booking-link";
 import { attachDurations, reflowTimes, timeToMin, isRouteInsight } from "@/lib/trip-edit";
@@ -19,6 +21,9 @@ import {
   type CarRentalDraft,
   type LodgingDraft,
 } from "@/components/bookings";
+
+// Leaflet 依賴 window，一律 dynamic + ssr:false（specs/map-view.md）
+const DayRouteMap = dynamic(() => import("@/components/day-route-map"), { ssr: false });
 
 type ScheduleItem = {
   time: string;
@@ -141,6 +146,9 @@ export default function TripViewPage() {
   const [editing, setEditing] = useState(false);
   const [draftDays, setDraftDays] = useState<DraftDay[]>([]);
   const [saving, setSaving] = useState(false);
+  // 單日路線圖（specs/map-view.md）：哪些天展開地圖 + 舊行程降級用的收藏座標對映（懶載入，全頁共用一次）
+  const [mapOpenDays, setMapOpenDays] = useState<Set<number>>(new Set());
+  const [collectionCoords, setCollectionCoords] = useState<Map<string, { lat: number; lng: number }> | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
 
   // 航班/租車有自己的編輯模式：儲存後補填不重新生成（specs/flights-rentals.md §2.5）
@@ -201,6 +209,33 @@ export default function TripViewPage() {
   function cancelEdit() {
     setEditing(false);
     setSaveError(null);
+  }
+
+  // 收藏座標對映：只在第一次展開地圖時打一次（免費 Firestore 讀），供舊行程（無持久化座標）的名稱降級對映。
+  async function loadCollectionCoords() {
+    if (collectionCoords) return;
+    try {
+      const res = await authedFetch("/api/collection");
+      const data = (await res.json()) as { places?: { name: string; location: { lat: number; lng: number } }[] };
+      const map = new Map<string, { lat: number; lng: number }>();
+      for (const p of data.places ?? []) map.set(p.name, p.location);
+      setCollectionCoords(map);
+    } catch {
+      setCollectionCoords(new Map()); // 失敗也設空 map，避免每次展開都重打；地圖走「排除」路徑降級
+    }
+  }
+
+  function toggleDayMap(day: number) {
+    setMapOpenDays((prev) => {
+      const next = new Set(prev);
+      if (next.has(day)) {
+        next.delete(day);
+      } else {
+        next.add(day);
+        void loadCollectionCoords();
+      }
+      return next;
+    });
   }
 
   // 刪除/排序後立即以當天錨點重排時間（所見即所得），時長跟著項目走
@@ -541,10 +576,21 @@ export default function TripViewPage() {
               !editing && view.trip.weather && view.trip.weather.length === view.trip.days.length
                 ? view.trip.weather[day.day - 1]
                 : undefined;
+            const dayMapResolved = mapOpenDays.has(day.day)
+              ? resolveDayMapItems(day.schedule, collectionCoords)
+              : null;
             return (
             <div key={day.day} className="mb-6">
               <div className="mb-2 flex flex-wrap items-center gap-2">
                 <h2 className="text-sm font-semibold text-neutral-800">第 {day.day} 天</h2>
+                {!editing && (
+                  <button
+                    onClick={() => toggleDayMap(day.day)}
+                    className="rounded-full border border-neutral-300 px-2 py-0.5 text-xs text-neutral-600 hover:bg-neutral-50"
+                  >
+                    {mapOpenDays.has(day.day) ? "收合地圖" : "🗺️ 地圖"}
+                  </button>
+                )}
                 {dayWeather && (
                   <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2 py-0.5 text-xs text-sky-700 ring-1 ring-sky-100">
                     <span>{weatherEmoji(dayWeather.description)}</span>
@@ -558,6 +604,16 @@ export default function TripViewPage() {
                   </span>
                 )}
               </div>
+              {dayMapResolved && (
+                <div className="mb-3">
+                  <DayRouteMap items={dayMapResolved.items} />
+                  {dayMapResolved.excludedCount > 0 && (
+                    <p className="mt-1 text-xs text-neutral-400">
+                      {dayMapResolved.excludedCount} 個項目無座標，未顯示
+                    </p>
+                  )}
+                </div>
+              )}
               <ul className="space-y-2">
                 {day.schedule.map((item, i) => (
                   <li key={i} className="flex gap-3 rounded-lg border border-neutral-200 px-3 py-2.5">

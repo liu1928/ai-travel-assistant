@@ -2,9 +2,13 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import type { SavedPlace, PlaceSearchResult, PlaceTag } from "@/schema/place";
 import { useAuth, signOutUser, authedFetch } from "@/lib/use-auth";
 import { GoogleSignInButton } from "@/components/google-signin";
+
+// Leaflet 依賴 window，一律 dynamic + ssr:false（specs/map-view.md）
+const CollectionMap = dynamic(() => import("@/components/collection-map"), { ssr: false });
 
 const TAG_STYLE: Record<string, string> = {
   海景: "bg-sky-50 text-sky-700 ring-sky-200",
@@ -62,6 +66,7 @@ export default function Home() {
     | { status: "done"; scanned: number; updated: number; closedFound: number; failed: number; remaining: number }
     | { status: "error"; message: string }
   >({ status: "idle" });
+  const [collectionView, setCollectionView] = useState<"list" | "map">("list");
 
   // 群組成員編輯
   const [memberEditGroup, setMemberEditGroup] = useState<string | null>(null);
@@ -459,6 +464,20 @@ export default function Home() {
           </h2>
           {saved.length > 0 && (
             <div className="flex items-center gap-2">
+              <div className="flex rounded-lg border border-neutral-300 p-0.5 text-xs font-medium">
+                <button
+                  onClick={() => setCollectionView("list")}
+                  className={`rounded-md px-2.5 py-0.5 transition-colors ${collectionView === "list" ? "bg-neutral-800 text-white" : "text-neutral-600 hover:bg-neutral-50"}`}
+                >
+                  清單
+                </button>
+                <button
+                  onClick={() => setCollectionView("map")}
+                  className={`rounded-md px-2.5 py-0.5 transition-colors ${collectionView === "map" ? "bg-neutral-800 text-white" : "text-neutral-600 hover:bg-neutral-50"}`}
+                >
+                  地圖
+                </button>
+              </div>
               <button
                 onClick={() => void runRefreshStatus()}
                 disabled={refreshStatus.status === "running"}
@@ -501,6 +520,8 @@ export default function Home() {
           <p className="rounded-lg border border-dashed border-neutral-300 px-4 py-8 text-center text-sm text-neutral-500">
             還沒有收藏。搜尋一個地點，加進來吧。
           </p>
+        ) : collectionView === "map" ? (
+          <CollectionMap places={saved} />
         ) : (
           <div className="space-y-6">
             {/* 有群組的分區 */}
