@@ -27,6 +27,10 @@ type ScheduleItem = {
   type: "transport" | "food" | "place" | "rest";
   location?: string;
   durationMin?: number; // AI 生成帶出的預計佔用分鐘數，儲存時原樣傳遞
+  placeId?: string;     // server 附掛的收藏對映錨定，儲存時原樣傳遞
+  lat?: number;
+  lng?: number;
+  openingWarning?: string;
 };
 type TripDay = { day: number; schedule: ScheduleItem[] };
 type Trip = {
@@ -42,6 +46,7 @@ type Trip = {
   lodgings?: Lodging[];
   weather?: DailyWeather[];       // 生成當下抓的天氣快照，儲存時原樣傳遞
   exchangeRate?: ExchangeRate;    // 生成當下抓的匯率快照，儲存時原樣傳遞
+  startDate?: string;             // server 附掛的出發日（回顯 body.startDate），儲存時原樣傳遞
 };
 
 type GenState =

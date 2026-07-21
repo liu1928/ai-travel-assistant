@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { tripSchema, flightSchema, carRentalSchema, lodgingSchema, tripWithBookingsSchema } from "../trip";
+import {
+  tripSchema,
+  scheduleItemSchema,
+  flightSchema,
+  carRentalSchema,
+  lodgingSchema,
+  tripWithBookingsSchema,
+  savedScheduleItemSchema,
+} from "../trip";
 
 const validTrip = {
   title: "台中城市放鬆行",
@@ -217,5 +225,66 @@ describe("tripWithBookingsSchema", () => {
   it("tripSchema（AI 輸出用）沒有 weather/exchangeRate 欄位——防止模型編造天氣/匯率", () => {
     expect("weather" in tripSchema.shape).toBe(false);
     expect("exchangeRate" in tripSchema.shape).toBe(false);
+  });
+});
+
+describe("行程項目錨定（savedScheduleItemSchema/startDate，specs/schedule-anchoring.md）", () => {
+  const baseItem = { time: "10:30", title: "美術館", description: "散步看展", type: "place" as const };
+
+  it("接受合法 placeId/lat/lng/openingWarning", () => {
+    const parsed = savedScheduleItemSchema.safeParse({
+      ...baseItem,
+      placeId: "ChIJxxx",
+      lat: 24.15,
+      lng: 120.67,
+      openingWarning: "今天公休",
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it("舊資料缺新欄位仍通過（免遷移）", () => {
+    expect(savedScheduleItemSchema.safeParse(baseItem).success).toBe(true);
+  });
+
+  it("拒絕超界座標", () => {
+    expect(savedScheduleItemSchema.safeParse({ ...baseItem, lat: 91 }).success).toBe(false);
+    expect(savedScheduleItemSchema.safeParse({ ...baseItem, lng: 181 }).success).toBe(false);
+  });
+
+  it("scheduleItemSchema（AI 輸出用）沒有 placeId/lat/lng/openingWarning 欄位——防止模型編造錨定資料", () => {
+    expect("placeId" in scheduleItemSchema.shape).toBe(false);
+    expect("lat" in scheduleItemSchema.shape).toBe(false);
+    expect("lng" in scheduleItemSchema.shape).toBe(false);
+    expect("openingWarning" in scheduleItemSchema.shape).toBe(false);
+  });
+
+  it("tripSchema（AI 輸出用）沒有 startDate 欄位——防止模型編造出發日", () => {
+    expect("startDate" in tripSchema.shape).toBe(false);
+  });
+
+  it("tripWithBookingsSchema 接受合法 startDate、拒絕非法格式", () => {
+    expect(tripWithBookingsSchema.safeParse({ ...validTrip, startDate: "2026-09-25" }).success).toBe(true);
+    expect(tripWithBookingsSchema.safeParse({ ...validTrip, startDate: "2026/09/25" }).success).toBe(false);
+  });
+
+  it("舊文件缺 startDate → 省略（免遷移）", () => {
+    const parsed = tripWithBookingsSchema.safeParse(validTrip);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.startDate).toBeUndefined();
+  });
+
+  it("tripWithBookingsSchema 的 schedule item 接受錨定欄位", () => {
+    const full = {
+      ...validTrip,
+      days: [
+        {
+          day: 1,
+          schedule: [{ ...validTrip.days[0].schedule[0], placeId: "ChIJxxx", lat: 24.15, lng: 120.67 }],
+        },
+      ],
+    };
+    const parsed = tripWithBookingsSchema.safeParse(full);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.days[0].schedule[0].placeId).toBe("ChIJxxx");
   });
 });

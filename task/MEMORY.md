@@ -242,3 +242,30 @@ App Hosting `runConfig` 只有 cpu/memoryMiB/maxInstances/minInstances/concurren
 
 **GLM 仲裁品質**：第一輪它把一條「regex 子網域繞過」報成 🐛，實測（`node -e` + 單測）證明 regex
 有 `^...$` 錨點、`google.evil.com` 被擋 → false positive。又一次印證鐵律：reviewer 意見先驗證再算數。
+
+---
+
+## 2026-07-21：Schedule Anchoring（地基）+ GLM review 工具連續第二輪失效
+
+**任務**：實作 `specs/schedule-anchoring.md`（2026-07-21 定案 8 份延伸功能 spec 的共用地基）。做法見
+task/PLAN.md 對應節、REPORT.md 對應節，不重複。這裡只記兩件下輪會再遇到的事。
+
+**GLM review 工具本輪全滅**：4 次呼叫（1 次完整 diff + 3 次逐步縮小到 1.5KB 的 payload）——2 次 504、
+2 次回傳 `<<ccr:…>>`（harness 壓縮成無法展開的內容參考）。**縮小 payload 這次沒用**（2026-07-20 那輪
+「聚焦小批」至少換到 1 則可讀，這輪連 1.5KB 都被壓縮）。**教訓：這兩輪連續出問題，工具本身可能在
+退化，不是單次網路抖動**——下輪如果又全滅，該做的不是繼續換小 payload 硬試，是直接跟 peanut 回報
+「glm-reviewer 後端疑似有系統性問題，需要檢查」，別把時間耗在重試上。本輪的替代做法：針對 GLM
+原本該檢查的 3 個最高風險點（型別放寬安全性、`filter()` 物件參照是否共用、覆寫 schema 後既有約束
+是否還在）逐一自驗（含一個獨立 `node -e` 重現腳本），記錄自驗依據到 REVIEW.md，跟「GLM 說安全」明確
+標成不同證據來源，不能混為一談。
+
+**write-back 解耦設計的關鍵驗證**：這輪最重要的技術決策是「Routes 迴圈裡任一 stop 定位失敗就整天放棄
+車程估計」跟「把已解析成功的 stop 寫回 placeId/lat/lng」要解耦——原本 `break` 拿掉後改成跑完全部
+stops 才判斷 `allResolved`。這個設計成立的前提是 `array.filter()` 回傳的元素跟原陣列共用物件參照
+（mutate 有效），**這是基礎 JS 語意但這輪特地寫了獨立腳本驗證而非憑印象假設**——因為如果這個前提
+錯了，整個 spec 的核心價值（省下已經算出的資料）會在執行期悄悄失敗且沒有任何測試會抓到（單測目前
+沒有覆蓋這條路徑，屬已知限制，下輪如果要加 route.ts 這條路徑的整合測試可以考慮，本輪沒做）。
+
+**已知限制（未修）**：route.ts 的寫回邏輯（`stop.placeId = …` 那段）沒有自動化測試覆蓋——本專案
+沒有 fetch mock 慣例，這條路徑目前只靠上面提到的獨立驗證腳本 + 型別系統把關，不是回歸測試。跟
+2026-07-11 那輪「429 重試路徑沒有自動化測試」是同一類已知缺口。

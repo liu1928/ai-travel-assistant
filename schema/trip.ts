@@ -34,25 +34,29 @@ export const tripBudgetSchema = z
   .refine((b) => b.max >= b.min, { message: "budget.max 不可小於 min", path: ["max"] });
 export type TripBudget = z.infer<typeof tripBudgetSchema>;
 
-export const tripSchema = z.object({
-  title: z.string().min(1),
-  location: z.string().min(1),
-  style: tripStyle,
-  summary: z.string().min(1),
-  // day 編號必須從 1 開始連續（防 AI 只輸出「第 3 天」這種缺天結果；refinement 只在
-  // client-side 驗證，structured outputs 的 API 端 grammar 不含此約束）
-  days: z
-    .array(tripDaySchema)
+// day 編號必須從 1 開始連續（防 AI 只輸出「第 3 天」這種缺天結果；refinement 只在
+// client-side 驗證，structured outputs 的 API 端 grammar 不含此約束）。抽成共用 helper，
+// 因為 tripWithBookingsSchema 用 .extend() 覆寫 days 後會遺失原本掛在 tripSchema.days 上的 superRefine。
+const consecutiveDaysArray = <T extends z.ZodTypeAny>(daySchema: T) =>
+  z
+    .array(daySchema)
     .min(1, "days 不可為空")
     .superRefine((days, ctx) => {
-      const sorted = days.map((d) => d.day).sort((a, b) => a - b);
+      const sorted = (days as { day: number }[]).map((d) => d.day).sort((a, b) => a - b);
       for (let i = 0; i < sorted.length; i++) {
         if (sorted[i] !== i + 1) {
           ctx.addIssue({ code: "custom", message: "days 的 day 編號必須從 1 開始且連續" });
           break;
         }
       }
-    }),
+    });
+
+export const tripSchema = z.object({
+  title: z.string().min(1),
+  location: z.string().min(1),
+  style: tripStyle,
+  summary: z.string().min(1),
+  days: consecutiveDaysArray(tripDaySchema),
   insights: z.array(z.string()),
   budget: tripBudgetSchema,
 });
@@ -120,9 +124,27 @@ export const exchangeRateSchema = z.object({
 });
 export type ExchangeRate = z.infer<typeof exchangeRateSchema>;
 
-// 儲存/編輯用：Trip + 訂位資料 + 天氣/匯率快照。
+// --- 行程項目錨定（server 生成時解析出的座標/placeId，用完即丟很浪費）---
+// ⚠️ 同上：這些欄位絕不能進 scheduleItemSchema/tripSchema（AI structured output），
+// 否則模型會編造 placeId/座標。全由 /api/trip/generate 生成後附掛，見 specs/schedule-anchoring.md。
+export const savedScheduleItemSchema = scheduleItemSchema.extend({
+  placeId: z.string().optional(), // 收藏對映成功才有（Google Place ID）
+  lat: z.number().min(-90).max(90).optional(),
+  lng: z.number().min(-180).max(180).optional(),
+  openingWarning: z.string().optional(), // specs/opening-hours.md 寫入，本檔只留欄位
+});
+export type SavedScheduleItem = z.infer<typeof savedScheduleItemSchema>;
+
+export const savedTripDaySchema = tripDaySchema.extend({
+  schedule: z.array(savedScheduleItemSchema).min(1, "每天至少要有一個行程"),
+});
+export type SavedTripDay = z.infer<typeof savedTripDaySchema>;
+
+// 儲存/編輯用：Trip + 訂位資料 + 天氣/匯率快照 + 行程項目錨定。
 // 舊 Firestore 文件缺欄位 → default 補空/略過，免資料遷移。
 export const tripWithBookingsSchema = tripSchema.extend({
+  days: consecutiveDaysArray(savedTripDaySchema),
+  startDate: z.string().regex(datePattern, "startDate 必須是 YYYY-MM-DD 格式").optional(),
   flights: z.array(flightSchema).default([]),
   carRentals: z.array(carRentalSchema).default([]),
   lodgings: z.array(lodgingSchema).default([]),

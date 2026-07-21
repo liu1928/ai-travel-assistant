@@ -271,4 +271,48 @@ vitest **164/164**（新增 5 個 extractNameFromHtml 測試）✅、tsc ✅、e
 ## 驗證
 
 tsc ✅、eslint ✅、vitest **169/169**（新增 5：weather/exchangeRate schema）✅、`next build` ✅。
+
+---
+
+# REVIEW — GLM-5.2 異質審查（Schedule Anchoring，specs/schedule-anchoring.md）
+
+> 時間戳：2026-07-21（Asia/Taipei）
+> 審查範圍：`schema/trip.ts`（`consecutiveDaysArray` helper 抽出、`savedScheduleItemSchema`/`savedTripDaySchema`、
+> `tripWithBookingsSchema` 加 `startDate`）、`app/api/trip/generate/route.ts`（Routes 迴圈寫回 placeId/lat/lng 與整天跳過判斷解耦）、
+> `app/trip/page.tsx`/`app/trips/[id]/page.tsx`（本地 type 複本同步）、`schema/__tests__/trip.test.ts`（新增 8 條）。
+> diff 見 task/diff.patch。審查者：GLM-5.2（MCP `glm-reviewer.review_code`）。
+>
+> ⚠️ 工具限制（比 2026-07-20 那輪更嚴重）：本輪 4 次呼叫全數失敗——2 次回傳 504、2 次回傳被 harness
+> 壓縮成無法展開的內容參考（`<<ccr:…>>`，含縮到 1.5KB 的最小 payload 仍一樣），**沒有任何一則取得可讀全文**。
+> 已按同一套「聚焦小批＋主線獨立驗證」流程處理，逐條記錄自我驗證依據；無法歸類為「GLM 已驗證」的項目，
+> 一律標「自驗（GLM 不可用）」以區分證據來源。
+
+## 聚焦重審（GLM 全數不可用，改主線獨立驗證）
+
+- **`day.schedule as SavedScheduleItem[]` 型別放寬是否安全**：`SavedScheduleItem = scheduleItemSchema.extend({...都是 optional})`，
+  原始 `ScheduleItem` 值本來就滿足這個超集型別（缺的都是可選欄位），`pnpm typecheck` 全綠且未見 `as unknown as` 這種
+  「型別系統認為不安全才需要的雙重轉型」，確認是合法的窄→寬轉型，非危險 cast。
+- **`filter()` 出來的 `stops` 跟原陣列 `day.schedule` 是否共用物件參照（整個 write-back 設計的前提）**：
+  寫了獨立重現腳本驗證（非猜測）——`day.schedule.filter(...)` 對過濾出的元素直接賦值，
+  原陣列對應位置同步反映變更，未過濾掉的 `transport` 項目不受影響。確認共用參照，mutate 有效。
+  ```
+  node -e '<見對話紀錄，3 項 place/transport/food，對 filter 結果賦值後印 day.schedule>'
+  → place/food 兩項出現 placeId/lat/lng，transport 項未變 ✅
+  ```
+- **`allResolved=false` 但部分 stop 已寫入 placeId/lat/lng 是否合理**：程式沒有任何回滾（rollback）邏輯，
+  已成功解析的 stop 不會因同一天後面的 stop 失敗而被清掉——這正是 spec §1.3 要求的「寫回與整天跳過估計解耦」，
+  非缺陷。原本 `break` 拿掉後迴圈會跑完全部 stops 才判斷 `allResolved`，車程估計仍照樣 `continue` 跳過，
+  行為對「是否估車程」這件事沒有改變，只多寫回了部分已解析的錨定資料。
+- **`consecutiveDaysArray` 抽成泛型 helper 後，`tripWithBookingsSchema` 是否仍保有 day 連續性檢查**：
+  `lib/__tests__/trip-schema.test.ts` 既有測試「`tripWithBookingsSchema`（PATCH 編輯路徑）繼承同一約束」
+  在本輪改動後**依然通過**（見驗證結果），證明 `.extend({ days: consecutiveDaysArray(savedTripDaySchema) })`
+  正確覆寫且沿用同一份連續性邏輯，未因抽 helper 而遺失。
+- **`(days as { day: number }[])` 型別斷言（helper 內部）**：泛型 `T extends z.ZodTypeAny` 讓 TS 無法靜態得知
+  `z.infer<T>` 一定有 `day` 屬性，但這個 helper 未匯出、只在本檔案內兩處呼叫（`tripDaySchema`／`savedTripDaySchema`），
+  兩者皆定義 `day: z.number().int().positive()`，斷言在所有呼叫點都成立，非未經檢查的濫用。
+
+## 驗證
+
+`pnpm typecheck` ✅、`pnpm test` **177/177**（新增 8：schedule anchoring schema）✅、`pnpm lint` ✅、`pnpm build` ✅。
+人工實測（生成流程、Firestore 讀寫）待 peanut 部署後驗收，見 task/REPORT.md。
 統計：真且已修 2（NaN 防呆、weather 索引位移守衛）、假/現況不成立 2、刻意設計 3、不修 1、已答 2。

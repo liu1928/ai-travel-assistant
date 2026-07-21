@@ -16,6 +16,7 @@ import {
   type Flight,
   type CarRental,
   type Lodging,
+  type SavedScheduleItem,
 } from "@/schema/trip";
 import type { SavedPlace } from "@/schema/place";
 import { z } from "zod";
@@ -197,24 +198,34 @@ export async function POST(req: NextRequest) {
     const mode: TravelMode = body.travelMode ?? "DRIVE";
 
     for (const day of trip.days) {
-      const stops = day.schedule.filter((s) => s.type === "place" || s.type === "food");
+      // 型別放寬到 SavedScheduleItem（scheduleItemSchema 的 server 附掛超集）以便就地寫回
+      // placeId/lat/lng；AI 輸出的 schedule 本身沒有這些欄位，只是這裡要順手存下解析結果
+      // （specs/schedule-anchoring.md）。stops 跟 day.schedule 共用物件參照，寫入即生效。
+      const scheduleItems = day.schedule as SavedScheduleItem[];
+      const stops = scheduleItems.filter((s) => s.type === "place" || s.type === "food");
       const coords: { lat: number; lng: number }[] = [];
 
-      // 任一 stop 定位失敗就整天跳過估計——不可壓縮 coords，否則把
+      // 任一 stop 定位失敗就整天跳過車程估計——不可壓縮 coords，否則把
       // A→(定位失敗的 B)→C 當成 A→C 直算，移動時間會被系統性低估（對應錯位）。
+      // 但寫回 placeId/lat/lng 跟這個判斷解耦：已經解析成功的 stop 照樣存，不因同一天
+      // 其他 stop 失敗而放棄（見 specs/schedule-anchoring.md §1.3）。
       let allResolved = true;
       for (const stop of stops) {
         const known = placeByName.get(stop.location ?? stop.title);
         if (known) {
+          stop.placeId = known.placeId;
+          stop.lat = known.location.lat;
+          stop.lng = known.location.lng;
           coords.push(known.location);
+          continue;
+        }
+        const resolved = await resolveCoordinates(stop.location ?? stop.title);
+        if (resolved) {
+          stop.lat = resolved.lat;
+          stop.lng = resolved.lng;
+          coords.push(resolved);
         } else {
-          const resolved = await resolveCoordinates(stop.location ?? stop.title);
-          if (resolved) {
-            coords.push(resolved);
-          } else {
-            allResolved = false;
-            break;
-          }
+          allResolved = false;
         }
       }
 
@@ -238,9 +249,10 @@ export async function POST(req: NextRequest) {
     // Routes 是加值資訊，不影響主要生成結果
   }
 
-  // 使用者輸入的訂位資料 + 生成當下抓的天氣/匯率快照一併附掛回傳
-  //（AI 輸出本身不含這些，見 specs/flights-rentals.md §3；exchangeRate 為 undefined 時 JSON 自動略過）
+  // 使用者輸入的訂位資料 + 生成當下抓的天氣/匯率快照 + 出發日一併附掛回傳
+  //（AI 輸出本身不含這些，見 specs/flights-rentals.md §3、specs/schedule-anchoring.md；
+  // exchangeRate/startDate 為 undefined 時 JSON 自動略過）
   return NextResponse.json({
-    trip: { ...trip, flights, carRentals, lodgings, weather, exchangeRate },
+    trip: { ...trip, flights, carRentals, lodgings, weather, exchangeRate, startDate: body.startDate },
   });
 }

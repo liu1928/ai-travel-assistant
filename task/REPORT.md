@@ -183,3 +183,57 @@
 ## 部署
 
 改動在本機工作樹，**未 commit / 未部署**（本輪含先前未提交的 weather/currency 進行中工作）。依鐵律停止於此，等 peanut 驗收後再決定 commit + push（Firebase App Hosting 自動部署）。
+
+---
+
+# REPORT 2026-07-21：Schedule Anchoring（地基，`specs/schedule-anchoring.md`）
+
+引用審查：task/REVIEW.md **2026-07-21（Schedule Anchoring）**。
+
+## 背景
+
+`/api/trip/generate` 的 Routes 估車程迴圈本已逐 stop 解析出座標（收藏對映 or `resolveCoordinates`），但解析結果用完即丟；`body.startDate` 也只用於天氣/假日查詢，沒存進 trip。這是 2026-07-21 定案的 8 份延伸功能 spec 裡的共用地基——`opening-hours`、`map-view`、`day-regenerate`、`export-offline`、`trip-day-mode` 五份下游功能都需要行程項目帶 `placeId`/`lat`/`lng` 才能運作，本輪把「已經算出但沒存」的資料存下來，零額外 API 成本。
+
+## 做了什麼
+
+1. **`schema/trip.ts`**：把 `tripSchema.days` 原本內嵌的「day 編號從 1 開始連續」`superRefine` 抽成共用泛型 helper `consecutiveDaysArray`，避免 `tripWithBookingsSchema` 用 `.extend()` 覆寫 `days` 時遺失這個檢查。新增 `savedScheduleItemSchema`（`scheduleItemSchema` 的 server 附掛超集，加 `placeId`/`lat`/`lng`/`openingWarning`，全 optional）與 `savedTripDaySchema`；`tripWithBookingsSchema` 改用 `consecutiveDaysArray(savedTripDaySchema)` 並新增 `startDate`（optional，YYYY-MM-DD）。⚠️ 這些欄位刻意不進 `scheduleItemSchema`/`tripSchema`（AI structured output），否則模型會編造 placeId/座標/出發日。
+2. **`app/api/trip/generate/route.ts`**：Routes 迴圈原本「任一 stop 定位失敗就整天放棄」的邏輯拿掉 `break`，改成逐 stop 都嘗試寫回 `placeId`（收藏對映命中）或 `lat`/`lng`（`resolveCoordinates` 命中）；是否跳過車程估計仍看 `allResolved`，但寫回動作與此解耦——已解析成功的 stop 不因同一天其他 stop 失敗而被漏記。回傳 payload 加 `startDate: body.startDate`。
+3. **前端 type 複本同步**：`app/trips/[id]/page.tsx`、`app/trip/page.tsx` 的本地 `ScheduleItem`/`SavedTrip`/`Trip` type 補上新欄位（維持既有「各自手刻」慣例，未改抽共用型別——範圍外）。確認編輯儲存路徑（`attachDurations`/`saveEdit` 的 `{...item}` 展開、`saveBookings` 的 `{...gen.trip}` 整包回存）都會原樣帶過新欄位，不需額外改動。
+
+## 改動檔案
+
+| 檔案 | 變更 |
+|---|---|
+| `schema/trip.ts` | 抽 `consecutiveDaysArray` helper；新增 `savedScheduleItemSchema`/`savedTripDaySchema`；`tripWithBookingsSchema` 覆寫 days + 加 `startDate` |
+| `app/api/trip/generate/route.ts` | Routes 迴圈寫回 placeId/lat/lng（與整天跳過估計解耦）；payload 加 `startDate` |
+| `app/trip/page.tsx` | `ScheduleItem`/`Trip` 本地 type 加新欄位 |
+| `app/trips/[id]/page.tsx` | `ScheduleItem`/`SavedTrip` 本地 type 加新欄位 |
+| `schema/__tests__/trip.test.ts` | 新增 8 條：savedScheduleItemSchema 驗證（合法/超界座標/舊資料相容）、startDate 驗證、AI 輸出 schema 鐵律測試 |
+
+## 測試結果
+
+- `pnpm typecheck`：過
+- `pnpm test`：**14 files / 177 tests 全過**（本輪新增 8；另確認既有 `lib/__tests__/trip-schema.test.ts` 的「tripWithBookingsSchema 繼承 day 連續性約束」6 條在 helper 抽出後依然全過，未迴歸）
+- `pnpm lint`：過
+- `pnpm build`：過
+
+## GLM review 統計（詳 task/REVIEW.md 2026-07-21）
+
+⚠️ **本輪 GLM 全數不可用**：4 次呼叫（含 1 次完整 diff、3 次縮小 payload）全部失敗——2 次 504、2 次回傳被 harness 壓縮成無法展開的內容參考（最小已縮到 1.5KB 仍一樣），沒有任何一則取得可讀全文。比 2026-07-20 那輪（至少 1 則可讀）更嚴重。已改用「聚焦小批＋主線獨立驗證」流程處理最高風險的 3 個設計點：
+
+1. `filter()` 結果與原陣列共用物件參照（write-back 設計的前提）——**寫獨立重現腳本實測**（非猜測），確認 mutate 有效反映回 `day.schedule`。
+2. `as SavedScheduleItem[]` 型別放寬安全性——確認 `ScheduleItem` 結構性滿足 `SavedScheduleItem` 超集（缺的都是 optional），`pnpm typecheck` 全綠佐證。
+3. `tripWithBookingsSchema` 抽 helper 後是否仍保有 day 連續性檢查——既有回歸測試（非本輪新寫）驗證通過，非新增測試自證。
+
+真 P0/P1：0（自驗，非 GLM 確認）。無 GLM 提出的 finding 可仲裁。
+
+## Known issues / 已知取捨（不阻擋）
+
+1. **GLM review 工具本輪完全失效**：連續第二輪出現同類問題（2026-07-20 尚有 1 則可讀，本輪 0 則），建議 peanut 找時間檢查 `glm-reviewer-mcp` 後端狀態或額度，長期若持續失效需要考慮備援審查路徑。
+2. **`resolveCoordinates` 模糊比對準確度**：既有限制，本 spec 刻意不解（同名地點可能綁錯座標），已在 spec 記錄。
+3. **`openingWarning` 欄位目前只留位置未寫入**：寫入邏輯屬 `specs/opening-hours.md` 範圍，本輪不做。
+4. **下游 UI 呈現未做**：`placeId`/`lat`/`lng`/`startDate` 目前只落地不顯示，地圖/公休警示等 UI 由各自下游 spec（`map-view`/`opening-hours`/`day-regenerate`/`export-offline`/`trip-day-mode`）負責。
+
+## 部署
+
+改動在本機工作樹，**未 commit / 未部署**。依鐵律停止於此，等 peanut 驗收後再決定 commit + push（Firebase App Hosting 自動部署）。人工實測基準（待部署後跑）：①生成一筆勾選收藏地點的新行程 → Firestore doc 的 schedule item 帶 `placeId`/`lat`/`lng`、trip 帶 `startDate`；②讀取一筆舊行程（無新欄位）→ 頁面正常渲染不炸驗證。

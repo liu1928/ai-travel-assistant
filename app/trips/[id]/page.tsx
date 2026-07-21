@@ -27,6 +27,10 @@ type ScheduleItem = {
   type: "transport" | "food" | "place" | "rest";
   location?: string;
   durationMin?: number;
+  placeId?: string;
+  lat?: number;
+  lng?: number;
+  openingWarning?: string;
 };
 type TripDay = { day: number; schedule: ScheduleItem[] };
 // 編輯草稿：每項掛「有效時長」（進編輯模式時差分算出，跟著項目走），
@@ -47,6 +51,7 @@ type SavedTrip = {
   lodgings?: Lodging[];
   weather?: DailyWeather[];
   exchangeRate?: ExchangeRate;
+  startDate?: string;
   createdAt: number;
 };
 
