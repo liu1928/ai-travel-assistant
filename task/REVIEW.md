@@ -648,3 +648,61 @@ API 呼叫核對即時追蹤欄位名稱（`status`/`revisedTime`/`terminal`/`ga
 落在今天附近的真實行程才能看到視覺效果，本輪只能靠 build/typecheck/單測驗證邏輯與無執行期錯誤，
 視覺驗收留給 peanut 部署後用真實資料測。
 統計：真且已修 2（NaN 防呆、weather 索引位移守衛）、假/現況不成立 2、刻意設計 3、不修 1、已答 2。
+
+---
+
+# REVIEW — 租車建議 + 可變現租車連結（specs/car-rental-suggest.md）
+
+> 時間戳：2026-07-21 21:50–22:15（Asia/Taipei）
+> 審查範圍：`lib/trip-geo.ts`、`lib/car-rental-link.ts`、`lib/car-rentals.ts`、
+> `app/api/car-rental/suggest/route.ts`、`app/api/lodging/suggest/route.ts`（重構）、
+> `app/trips/[id]/page.tsx`、`components/bookings.tsx`；diff 見 task/diff.patch
+> 審查者：GLM-5.2（MCP `glm-reviewer.review_code`）。本輪呼叫 4 次全數失敗（3 次 `504`、1 次同），
+> 命中率延續本 session 一貫的不穩定（累計約 25% 成功率，見前幾輪教訓）。改走自我驗證協定：
+> 針對原本要問 GLM 的 6 個具體問題，逐一用 node 實測 / Context7 查文件 / 讀程式碼確認資料流。
+
+## 自我驗證（GLM 不可用，逐條問題自行查證）
+
+1. **`splitDate` 對沒補零日期（`"2026-1-5"`）、完全不合法字串（`"invalid-date"`）、月份 0
+   （`"2026-00-05"`）、空字串、`undefined` 的行為**：用 `node -e` 實測全部五種情況——沒補零正確解析
+   成 `{2026,1,5}`；其餘四種皆正確落到 30 天後的 fallback，沒有任何一種靜默產生錯誤但看似合法的
+   日期。`if (y && m && d)` 用真值檢查而非 `Number.isNaN`，雖然理論上day/month為 `0` 時會誤判，
+   但因為合法日期本來就不會是 `0`（月份 1-12、日期 1-31），這個「瑕疵」恰好跟「拒絕不合法輸入」
+   的目標一致，不算真的 bug。**確認無問題**。
+2. **`computeTripCentroid` 簡單算術平均在跨國際換日線（經度 ±180 附近）會算出錯誤質心**：
+   **確認是真實存在的球面幾何限制**，但這段邏輯是從 `app/api/lodging/suggest/route.ts`
+   原本已上線的內聯程式碼**原樣抽出**，非本輪新增的邏輯或新增的風險；本專案行程範圍目前是
+   東亞/東南亞（`regionCode: "TW"`、系統提示詞繁中導向），實際跨換日線的行程機率極低。
+   標記為**已知限制、非本輪修復範圍**（已寫進 `specs/car-rental-suggest.md` 但這裡更正：
+   spec 目前只記錄「schedule 地點對不到收藏」的限制，換日線這條之後應補上，不影響 commit）。
+3. **`suggestCarRentals` 用 `textQuery` + `includedType: "car_rental"` 是否有衝突、`includedType`
+   是否真的會過濾**：Context7 查證 Google Places API (New) `SearchTextRequest` 官方文件——
+   `textQuery` 與 `includedType` 可同時使用，不衝突；但文件明白寫「Text Search 只在『適用時』
+   套用 `includedType` 過濾（分地址型查詢 vs 分類型查詢），要保證每次都過濾必須額外設
+   `strictTypeFiltering: true`」。**確認是真問題並已修**：補上 `strictTypeFiltering: true`，
+   否則我原本程式碼註解宣稱的「避免混進洗車行/修車廠」不一定成立。
+4. **`buildCarRentalLink` 在 `app/trip/page.tsx`（生成預覽頁）呼叫時，`carRentals` 是否可能是
+   還沒驗證過的草稿空字串**：讀 `app/trip/page.tsx` 確認 `<BookingCards flights={gen.trip.flights}
+   carRentals={gen.trip.carRentals} lodgings={gen.trip.lodgings} />`——`gen.trip` 是 AI 生成
+   後已通過 zod schema 解析的結果，`carRentalSchema` 要求 `pickupLocation`/`dropoffLocation`
+   非空、`pickupTime`/`dropoffTime` 符合 HH:mm regex，`BookingCards` 收到的是已驗證資料，
+   不是編輯中的草稿字串（草稿字串屬於 `BookingsFields` 元件，跟顯示用的 `BookingCards`
+   是分開的兩個元件）。**確認無問題**。
+5. **`route.ts` 的 `tripId` 找不到 / Google Maps 金鑰缺失錯誤處理是否有遺漏 edge case**：
+   此檔案是 `app/api/lodging/suggest/route.ts` 既有已上線流程的結構性複製（`requireUid` →
+   `checkAndConsume` → `getTrip` 404 分支 → `suggestCarRentals` 502 分支），無新增邏輯分支，
+   跟已在生產環境驗證過的住宿建議路由行為一致。**確認無問題**。
+6. **`app/api/lodging/suggest/route.ts` 改呼叫 `computeTripCentroid` 是否行為不變**：抽出後的
+   函式內容跟原本內聯程式碼逐行比對一致（same loop、same 條件、same 平均公式），純函式抽取無
+   副作用差異；`pnpm test` 273/273 全過（含新增的 6 條 `computeTripCentroid` 單測）也佐證未破壞
+   既有行為。**確認無問題**。
+
+## 驗證
+
+`pnpm typecheck` ✅、`pnpm test` **273/273**（新增 12：`car-rental-link` 6 條、`trip-geo` 6 條）✅、
+`pnpm lint` ✅、`pnpm build` ✅（新路由 `/api/car-rental/suggest` 正確產生）。人工瀏覽器實測缺口：
+需要真實 `GOOGLE_MAPS_API_KEY` 環境與一筆有收藏地點的行程才能看到「找 XX 的租車」的真實結果，
+本輪只能靠 build/typecheck/單測驗證邏輯與無執行期錯誤，實際 Places 查詢結果與 rentalcars.com
+連結能否正常開啟留給 peanut 部署後用真實資料測。
+統計：真且已修 1（`strictTypeFiltering`）、確認無問題但值得記錄 5（日期解析防呆、換日線已知限制、
+生成預覽頁資料流、route.ts 結構複製、centroid 抽取行為不變）、GLM 全數不可用改自我驗證 4 次。

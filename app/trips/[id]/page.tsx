@@ -10,6 +10,7 @@ import { resolveDayMapItems } from "@/lib/day-map";
 import { currentTripDay, todayLocalDateStr, findNextStopIndex } from "@/lib/trip-day";
 import type { Flight, CarRental, Lodging, DailyWeather, ExchangeRate } from "@/schema/trip";
 import { buildLodgingLink } from "@/lib/booking-link";
+import { buildCarRentalLink } from "@/lib/car-rental-link";
 import { attachDurations, reflowTimes, timeToMin, isRouteInsight } from "@/lib/trip-edit";
 import {
   BookingCards,
@@ -76,6 +77,19 @@ type LodgingState =
   | { status: "idle" }
   | { status: "loading" }
   | { status: "ready"; items: LodgingItem[] }
+  | { status: "error"; message: string };
+
+// 租車建議（specs/car-rental-suggest.md）。命名加 Suggest 字尾避免跟既有 CarRental（schema 型別）
+// 與手動租車編輯器的 rentalDrafts/carRentals 狀態撞名。
+type CarRentalSuggestItem = {
+  place: { placeId: string; name: string; address?: string; rating?: number };
+  priceLevel?: number;
+  bookingUrl: string;
+};
+type CarRentalSuggestState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ready"; items: CarRentalSuggestItem[] }
   | { status: "error"; message: string };
 
 const STYLE_LABEL: Record<SavedTrip["style"], string> = {
@@ -204,6 +218,25 @@ export default function TripViewPage() {
       setLodging({ status: "ready", items: data.items ?? [] });
     } catch (e) {
       setLodging({ status: "error", message: e instanceof Error ? e.message : "查詢住宿失敗" });
+    }
+  }
+
+  // 租車建議（specs/car-rental-suggest.md）：架構仿 findLodging，無價位篩選（租車行少填 priceLevel）。
+  const [carRentalSuggest, setCarRentalSuggest] = useState<CarRentalSuggestState>({ status: "idle" });
+
+  async function findCarRentals(tripId: string) {
+    setCarRentalSuggest({ status: "loading" });
+    try {
+      const res = await authedFetch("/api/car-rental/suggest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tripId }),
+      });
+      const data = (await res.json()) as { items?: CarRentalSuggestItem[]; error?: string };
+      if (!res.ok) throw new Error(data.error ?? "查詢租車失敗");
+      setCarRentalSuggest({ status: "ready", items: data.items ?? [] });
+    } catch (e) {
+      setCarRentalSuggest({ status: "error", message: e instanceof Error ? e.message : "查詢租車失敗" });
     }
   }
 
@@ -660,6 +693,62 @@ export default function TripViewPage() {
                         className="shrink-0 text-xs font-medium text-teal-700 hover:text-teal-900"
                       >
                         訂房 →
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              ))}
+          </div>
+
+          {/* 租車建議 */}
+          <div className="mb-6 rounded-lg border border-neutral-200 p-4 print:hidden">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-neutral-800">🚗 租車建議</h3>
+              <a
+                href={buildCarRentalLink({ pickupLocation: view.trip.location, dropoffLocation: view.trip.location })}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="shrink-0 text-xs text-teal-700 hover:text-teal-900"
+              >
+                在 Rentalcars 看這區租車 →
+              </a>
+            </div>
+            <button
+              onClick={() => void findCarRentals(view.trip.id)}
+              disabled={carRentalSuggest.status === "loading"}
+              className="rounded-lg bg-teal-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-teal-800 disabled:opacity-40"
+            >
+              {carRentalSuggest.status === "loading" ? "搜尋中…" : `找 ${view.trip.location} 的租車`}
+            </button>
+            {carRentalSuggest.status === "error" && (
+              <p className="mt-2 text-sm text-red-600">{carRentalSuggest.message}</p>
+            )}
+            {carRentalSuggest.status === "ready" &&
+              (carRentalSuggest.items.length === 0 ? (
+                <p className="mt-2 text-sm text-neutral-500">查無符合的租車據點，稍後再試。</p>
+              ) : (
+                <ul className="mt-3 space-y-2">
+                  {carRentalSuggest.items.map((it) => (
+                    <li
+                      key={it.place.placeId}
+                      className="flex items-start justify-between gap-3 rounded-lg border border-neutral-100 px-3 py-2"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium text-neutral-900">
+                          {it.place.name}
+                          {typeof it.place.rating === "number" && (
+                            <span className="ml-2 text-xs text-amber-500">⭐{it.place.rating}</span>
+                          )}
+                        </p>
+                        {it.place.address && <p className="truncate text-xs text-neutral-400">{it.place.address}</p>}
+                      </div>
+                      <a
+                        href={it.bookingUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="shrink-0 text-xs font-medium text-teal-700 hover:text-teal-900"
+                      >
+                        租車 →
                       </a>
                     </li>
                   ))}

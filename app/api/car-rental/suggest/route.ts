@@ -3,10 +3,11 @@ import { requireUid } from "@/lib/auth";
 import { checkAndConsume, rateLimitHttp } from "@/lib/rate-limit";
 import { getTrip } from "@/lib/trips";
 import { listPlaces } from "@/lib/collection";
-import { suggestLodging } from "@/lib/lodging";
+import { suggestCarRentals } from "@/lib/car-rentals";
 import { computeTripCentroid } from "@/lib/trip-geo";
 
-// 住宿建議：以行程地理重心（schedule 地點對照收藏座標）查 Places 旅宿，依價位篩、掛訂房連結。
+// 租車建議：以行程地理重心（schedule 地點對照收藏座標）查 Places 租車據點，掛租車連結。
+// 沿用「places_search」既有護欄桶（跟住宿建議同一個成本類別，見 lib/quotas.ts）。
 export async function POST(req: NextRequest) {
   const auth = await requireUid(req);
   if (!auth.ok) return NextResponse.json({ error: auth.error.message }, { status: 401 });
@@ -17,10 +18,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: message }, { status, headers: { "Retry-After": String(retryAfterSec) } });
   }
 
-  const body = (await req.json().catch(() => null)) as { tripId?: unknown; maxPriceLevel?: unknown } | null;
+  const body = (await req.json().catch(() => null)) as { tripId?: unknown } | null;
   const tripId = typeof body?.tripId === "string" ? body.tripId : "";
   if (!tripId) return NextResponse.json({ error: "缺少 tripId" }, { status: 400 });
-  const maxPriceLevel = typeof body?.maxPriceLevel === "number" ? body.maxPriceLevel : undefined;
 
   const tripRes = await getTrip(auth.value, tripId);
   if (!tripRes.ok) {
@@ -32,20 +32,19 @@ export async function POST(req: NextRequest) {
   }
   const trip = tripRes.value;
 
-  // 地理重心：把 schedule 的 place/food stop 名對照收藏取座標，算質心（零額外 Places 成本）
   let center: { lat: number; lng: number } | undefined;
   const coll = await listPlaces(auth.value);
   if (!coll.ok) {
-    console.warn("[lodging] 讀收藏失敗，改用 location 字串查", coll.error.message);
+    console.warn("[car-rental] 讀收藏失敗，改用 location 字串查", coll.error.message);
   } else {
     const byName = new Map(coll.value.map((p) => [p.name, p.location]));
     center = computeTripCentroid(trip.days, byName);
   }
 
-  const result = await suggestLodging({ location: trip.location, center, maxPriceLevel });
+  const result = await suggestCarRentals({ location: trip.location, center });
   if (!result.ok) {
     return NextResponse.json(
-      { error: result.error.kind === "missing_key" ? "伺服器尚未設定 Google Maps 金鑰" : "查詢住宿失敗" },
+      { error: result.error.kind === "missing_key" ? "伺服器尚未設定 Google Maps 金鑰" : "查詢租車失敗" },
       { status: 502 },
     );
   }

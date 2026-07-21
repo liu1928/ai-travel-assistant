@@ -6,6 +6,7 @@ import { useState, type Dispatch, type SetStateAction } from "react";
 import type { Flight, CarRental, Lodging } from "@/schema/trip";
 import { nextAirline } from "@/lib/airlines";
 import { authedFetch } from "@/lib/use-auth";
+import { buildCarRentalLink } from "@/lib/car-rental-link";
 
 // 表單草稿一律用字串，送出時經 draftsToBookings 轉成 schema 型別（空的可選欄位會被省略）
 export type FlightDraft = {
@@ -289,6 +290,21 @@ export function BookingCards({ flights, carRentals, lodgings }: { flights?: Flig
                 {r.pickupDate ? `${r.pickupDate} ` : ""}{r.pickupTime} {r.pickupLocation} 取車 →{" "}
                 {r.dropoffDate ? `${r.dropoffDate} ` : ""}{r.dropoffTime} {r.dropoffLocation} 還車
                 {r.note && <span className="ml-1 text-xs text-neutral-400">（{r.note}）</span>}
+                <a
+                  href={buildCarRentalLink({
+                    pickupLocation: r.pickupLocation,
+                    dropoffLocation: r.dropoffLocation,
+                    pickupDate: r.pickupDate,
+                    pickupTime: r.pickupTime,
+                    dropoffDate: r.dropoffDate,
+                    dropoffTime: r.dropoffTime,
+                  })}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="ml-2 text-xs text-teal-700 hover:text-teal-900"
+                >
+                  找租車優惠 →
+                </a>
               </li>
             ))}
           </ul>
