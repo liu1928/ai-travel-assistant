@@ -368,4 +368,47 @@ tsc ✅、eslint ✅、vitest **169/169**（新增 5：weather/exchangeRate sche
 ## 驗證
 
 `pnpm typecheck` ✅、`pnpm test` **185/185**（新增 8：classifyStatus）✅、`pnpm lint` ✅、`pnpm build` ✅（`/api/collection/refresh-status` 正確註冊）。
+
+---
+
+# REVIEW — GLM-5.2 異質審查（Opening Hours，specs/opening-hours.md）
+
+> 時間戳：2026-07-21（三）（Asia/Taipei）
+> 審查範圍：`schema/place.ts`（openingHours/openingHoursCheckedAt）、`lib/opening-hours.ts`（新，compressOpeningHours/
+> formatOpeningHoursSummary/fetchOpeningHours/ensureOpeningHours/checkScheduleAgainstHours）、`lib/trip-days.ts`
+> （weekdayForDay）、`lib/collection.ts`（updateOpeningHours）、`lib/quotas.ts`、`lib/anthropic.ts`（營業時間摘要+星期幾表注入）、
+> `app/api/trip/generate/route.ts`（生成前補強+生成後驗證寫 openingWarning）、兩個前端頁面（⚠️ 徽章）、
+> `lib/__tests__/opening-hours.test.ts`（新）、`lib/__tests__/trip-days.test.ts`（weekdayForDay 補測）。
+> diff 見 task/diff.patch。審查者：GLM-5.2（MCP `glm-reviewer.review_code`）。
+>
+> ⚠️ 工具限制：本輪 3 次呼叫（完整 diff、聚焦 compressOpeningHours/checkScheduleAgainstHours 片段、
+> 最小化到 20 行的跨午夜算式）**全數回傳被 harness 壓縮成無法展開的內容參考**（`<<ccr:…>>`），
+> 連最小的一次也一樣——跟 2026-07-20 那輪不同，這次「縮小 payload」完全沒用（那時縮小有效）。
+> 已按 [[glm-review-tool-issues]] 記錄的流程切自我驗證，聚焦在提示送審時列出的 4 個最高風險點。
+
+## 聚焦重審（GLM 全數不可用，改主線獨立驗證）
+
+- **跨午夜時間比對邏輯正確性（原本要問 GLM 的第 1、2 點）**：寫獨立 node 腳本（非猜測）驗證 6 個案例——
+  正常跨午夜命中（23:00+60min 落在 22:00-02:00 內）、退化情況 close===open（"09:00-09:00"，展開成近乎全天，
+  雖非語意完美但此案例依 Google 官方文件不會在真實資料出現）、一般同日時段超時擋下、跨午夜時段「開始前」
+  正確擋下、跨午夜範圍邊界（`endMin === closeMin` 剛好卡到打烊）正確放行。全部符合預期。
+- **"缺 close 防禦分支"與同一天正常時段混雜的邊界（自我審查時額外發現，非 GLM 提出）**：原始寫法若同一天
+  先出現缺 close 的 period、後面又有正常時段，`byDay[day].push(...)` 會把 "24h" 和一般時段字串混在同一個
+  逗號分隔字串裡，產生語意不明的髒資料。**已修**：加 `if (byDay[day][0]==="24h") continue` 提前跳過；
+  補一條單測釘住（`lib/__tests__/opening-hours.test.ts`「同一天先出現缺 close 的 period...」）。雖然此
+  情境依 Google API 官方文件本不該與正常時段並存於同一天（只有全週 24h 特例才會缺 close，且該特例在函式
+  最前面已提早 return），但屬零成本的防禦硬化，typecheck/test 重跑確認無迴歸。
+- **ensureOpeningHours 的 best-effort 降級是否會漏資料（原本要問 GLM 的第 3 點）**：讀原始碼確認—— 
+  `checkAndConsume` 失敗時整批跳過（下次生成 TTL 到期會再試，不遺失，只是延後）；`fetchOpeningHours`
+  對單一地點失敗時該地點就是不進 `updates` map、`ensureOpeningHours` 回傳的陣列裡該地點維持原樣（不寫
+  `openingHoursCheckedAt`，下次生成會被 TTL 判定為過期再重試）——`mapLimit` 對每個地點獨立呼叫，一個地點
+  失敗不影響其他地點繼續處理，跟 `lib/place-status.ts` 上一輪已驗證過的 Result pattern 保證一致。
+- **route.ts 的 ensureOpeningHours 只在 `body.startDate` 存在時呼叫（原本要問 GLM 的第 4 點）**：這是
+  task/PLAN.md 已明確記錄並經 peanut 核准的設計取捨（沒有出發日期，抓到的營業時間這次生成也用不上，
+  比照 weather/holidays 既有的 startDate gate 慣例），非本輪臨時決定，不需重新驗證。
+
+## 驗證
+
+`pnpm typecheck` ✅、`pnpm test` **212/212**（新增 30：opening-hours 26 條 + trip-days weekdayForDay 4 條，
+含自我審查追加的 1 條防禦性測試）✅、`pnpm lint` ✅、`pnpm build` ✅。
 統計：真且已修 2（NaN 防呆、weather 索引位移守衛）、假/現況不成立 2、刻意設計 3、不修 1、已答 2。

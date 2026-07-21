@@ -134,6 +134,16 @@ export function expectedDayForWeekday(
 }
 
 /**
+ * day N（1-based）對應星期幾（0=日…6=六），以 startDate 為 day 1 錨點推算。
+ * startDate 格式不合回 undefined（specs/opening-hours.md 生成後驗證用）。
+ */
+export function weekdayForDay(startDate: string, day: number): number | undefined {
+  const d = new Date(`${startDate}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return undefined;
+  return (d.getDay() + (day - 1)) % 7;
+}
+
+/**
  * 驗證使用者提到的星期幾（換算成 expectedDay）在生成結果中確實存在；若同時提到時段，
  * 該天要有至少一項行程的 time 落在對應時間窗。expectedDay 為 undefined（沒提到星期幾，
  * 或沒有 startDate 錨點算不出）時視為不適用、直接放行——這是本檢查刻意的保守範圍：

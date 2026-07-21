@@ -299,3 +299,30 @@ CLOSED_*/非 2xx），完全不用碰網路——跟 `lib/aviationstack.ts` 的 
 `const trip = result.value`（一般可變物件）跟既有 Routes insights push 是同一個模式。**教訓：送審
 片段 diff 給 GLM 時，如果改動的變數在片段外有定義來源，GLM 容易對型別/可變性做出錯誤假設**——這類
 finding 用 grep 找一下變數宣告處就能秒判真假，比爭論「理論上可能怎樣」快很多。
+
+---
+
+## 2026-07-21（三）：Opening Hours（第三份下游 spec）+ GLM review 同一天內又全滅
+
+**任務**：實作 `specs/opening-hours.md`。做法見 PLAN.md/REPORT.md 對應節。這裡記三件事。
+
+**GLM review 這輪又全滅，且推翻了「縮小 payload 有效」的假設**：同一天內 place-freshness 那輪才剛
+一次成功，這輪 3 次呼叫（完整 diff、聚焦片段、縮到 20 行的最小算式）全部被壓縮成 `<<ccr:…>>`——
+**連 20 行都會被壓縮，證明縮小 payload 不是穩定解法，只是偶爾湊巧有效的手段之一**。已更新跨 session
+記憶 `glm-review-tool-issues` 修正這個認知：不再假設「縮小payload=解法」，改成「每次呼叫都當作有
+一定機率失敗，同輪重試 2-3 次仍全滅就切自我驗證」，不再對失敗模式做過度推論（之前分別下過「連續退化」
+「間歇性但可預期」兩個結論，這輪證明兩個都下得太早）。
+
+**Context7 查證 API 契約，沒有憑印象猜**：Google Places API (New) 的 `regularOpeningHours` 對「全週
+24 小時營業」的表示法（單一 period、`open={day:0,hour:0,minute:0}`、無 `close`）不是憑經驗猜的，
+是用 Context7 查 Google 官方文件（`/websites/developers_google_maps_places_web-service`）核對過的
+原文：「if a place is always open, the close field will not be set. Clients can rely on always
+open being represented as an open period containing day 0, hour 0, minute 0」。**這類「輸入資料
+的邊界表示法」不確定時，先查文件比憑印象寫程式再測試更快**——如果猜錯，寫的單測會驗證錯誤的假設，
+自己還會覺得測試都過了很安心，其實整個 24h 判斷都是錯的。
+
+**自我審查抓到一個 GLM 沒機會看到的真實邊界**：「缺 close 的防禦分支」跟同一天正常時段的 period 若
+先後出現，`push` 會把 "24h" 跟時段字串混進同一個逗號分隔字串，產生髒資料。這條不是 GLM 抓到的（GLM
+這輪完全沒回應），是在自己重新看 `compressOpeningHours` 邏輯、寫防禦性單測時發現的。**教訓：GLM 不可用
+時的自我驗證不是照抄 PLAN 裡列的風險點就結束，讀自己寫的程式碼時，順手多想一輪「這個防禦分支跟其他
+分支同時觸發會怎樣」，往往能抓到 reviewer 也會抓的那類問題。**

@@ -4,6 +4,8 @@ import { checkAndConsume, rateLimitHttp } from "@/lib/rate-limit";
 import { generateTrip, type HolidayInfo } from "@/lib/anthropic";
 import { listPlaces } from "@/lib/collection";
 import { estimateLegs, resolveCoordinates, type TravelMode } from "@/lib/routes";
+import { ensureOpeningHours, checkScheduleAgainstHours } from "@/lib/opening-hours";
+import { weekdayForDay } from "@/lib/trip-days";
 import { guessCountry, holidaysInRange } from "@/lib/holidays";
 import { fetchWeatherForecast, geocodeCityName, type DailyWeather } from "@/lib/weather";
 import { countryToCurrency, fetchExchangeRate, type ExchangeRate } from "@/lib/currency";
@@ -99,6 +101,16 @@ export async function POST(req: NextRequest) {
       excludedClosedNames = selected
         .filter((p) => p.businessStatus === "CLOSED_PERMANENTLY" || p.businessStatus === "NOT_FOUND")
         .map((p) => p.name);
+    }
+  }
+
+  // best-effort：補強收藏地點的營業時間（specs/opening-hours.md）。只在有 startDate 時才做——
+  // 沒有出發日期算不出對應第幾天是星期幾，抓到的資料這次生成也用不上（比照 weather/holidays 的 startDate gate）。
+  if (body.startDate && places.length > 0) {
+    try {
+      places = await ensureOpeningHours(auth.value, places);
+    } catch {
+      // 加值資訊，失敗不影響主要生成結果
     }
   }
 
@@ -217,6 +229,8 @@ export async function POST(req: NextRequest) {
       const scheduleItems = day.schedule as SavedScheduleItem[];
       const stops = scheduleItems.filter((s) => s.type === "place" || s.type === "food");
       const coords: { lat: number; lng: number }[] = [];
+      // 公休驗證（specs/opening-hours.md）：無 startDate 或格式不合 → undefined，checkScheduleAgainstHours 直接放行。
+      const weekday = body.startDate ? weekdayForDay(body.startDate, day.day) : undefined;
 
       // 任一 stop 定位失敗就整天跳過車程估計——不可壓縮 coords，否則把
       // A→(定位失敗的 B)→C 當成 A→C 直算，移動時間會被系統性低估（對應錯位）。
@@ -229,6 +243,10 @@ export async function POST(req: NextRequest) {
           stop.placeId = known.placeId;
           stop.lat = known.location.lat;
           stop.lng = known.location.lng;
+          if (weekday !== undefined && known.openingHours) {
+            const warning = checkScheduleAgainstHours(stop, weekday, known.openingHours);
+            if (warning) stop.openingWarning = warning;
+          }
           coords.push(known.location);
           continue;
         }

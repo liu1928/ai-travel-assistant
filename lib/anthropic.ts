@@ -16,6 +16,7 @@ import {
 } from "./trip-days";
 import type { DailyWeather } from "./weather";
 import type { ExchangeRate } from "./currency";
+import { formatOpeningHoursSummary } from "./opening-hours";
 
 const MODEL = envOr("ANTHROPIC_MODEL", "claude-sonnet-4-6");
 
@@ -244,7 +245,11 @@ export function buildUserMessage(input: GenerateTripInput): string {
         // 不剔除但提醒 AI 避免排入或請使用者確認（specs/place-freshness.md §1.5）。
         const closedNote =
           p.businessStatus === "CLOSED_TEMPORARILY" ? "（暫停營業中，避免排入或提醒使用者確認）" : "";
-        return `- ${p.name}${tags}${addr}${closedNote}`;
+        // 營業時間摘要只在有 startDate 時才有意義（沒有錨點算不出對應第幾天是星期幾）；
+        // specs/opening-hours.md §2「startDate 缺席→整個功能靜默降級」。
+        const hoursNote =
+          input.startDate && p.openingHours ? `（${formatOpeningHoursSummary(p.openingHours)}）` : "";
+        return `- ${p.name}${tags}${addr}${closedNote}${hoursNote}`;
       })
       .join("\n");
     parts.push(`收藏地點列表（可增減以達最佳體驗）：\n${lines}`);
@@ -257,6 +262,18 @@ export function buildUserMessage(input: GenerateTripInput): string {
     constraints.push(
       `出發日期：${input.startDate}${weekday}；day N 對應出發日 + (N-1) 天，請據此換算使用者提到的星期幾（如「週三」）對應第幾天`,
     );
+    // 公休驗證（specs/opening-hours.md）：只在算得出星期幾、且有地點附帶營業時間資料時才附表，
+    // 避免無意義時浪費 token；天數用既有推斷邏輯（AI 決定最終天數前無法得知確切值），cap 30 防禦。
+    const hasOpeningData = input.places?.some((p) => p.openingHours) ?? false;
+    if (!Number.isNaN(d.getTime()) && hasOpeningData) {
+      const dayCount = Math.min(input.days ?? inferMinDays(input.prompt ?? "") ?? 1, 30);
+      const rows = Array.from({ length: dayCount }, (_, i) => `day ${i + 1}=週${WEEKDAY_LABEL[(d.getDay() + i) % 7]}`).join(
+        "、",
+      );
+      constraints.push(
+        `各天對應星期幾：${rows}。排程必須避開各地點標示的公休日與非營業時段（見上方地點列表的營業時間摘要）。`,
+      );
+    }
   }
   // 天數是最常被忽略的約束（AI 會鎖定 prompt 裡的「第 N 天」只出那一天），
   // 有指定 → 硬指令；沒指定 → 從 prompt 推斷最低天數（generateTrip 生成後會照同一標準驗證）

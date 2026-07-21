@@ -439,6 +439,9 @@ function TripGenerateInner() {
                         {item.title}
                         <span className="ml-2 text-xs text-neutral-400">{TYPE_LABEL[item.type]}</span>
                       </p>
+                      {item.openingWarning && (
+                        <p className="mt-0.5 text-xs font-medium text-amber-600">⚠️ {item.openingWarning}</p>
+                      )}
                       <p className="text-xs text-neutral-500">{item.description}</p>
                       {(item.type === "place" || item.type === "food") && (
                         <a

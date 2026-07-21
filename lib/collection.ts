@@ -117,3 +117,26 @@ export async function updatePlaceStatus(
     return fail(e);
   }
 }
+
+export async function updateOpeningHours(
+  uid: string,
+  placeId: string,
+  data: {
+    openingHours?: Record<string, string | null>;
+    checkedAt: number;
+    businessStatus?: BusinessStatus;
+  },
+): Promise<Result<null, CollectionError>> {
+  try {
+    const update: Record<string, unknown> = { openingHoursCheckedAt: data.checkedAt };
+    if (data.openingHours) update.openingHours = data.openingHours;
+    if (data.businessStatus) {
+      update.businessStatus = data.businessStatus;
+      update.statusCheckedAt = data.checkedAt;
+    }
+    await placesCol(uid).doc(placeId).update(update);
+    return ok(null);
+  } catch (e) {
+    return fail(e);
+  }
+}

@@ -45,6 +45,10 @@ export const savedPlaceSchema = placeSearchResultSchema.extend({
   updatedAt: z.number(),
   businessStatus: businessStatus.optional(),
   statusCheckedAt: z.number().optional(), // epoch ms，上次檢查歇業狀態的時間
+  // 壓縮後的每週營業時間（specs/opening-hours.md），key 為 "0"(週日)~"6"(週六)；
+  // value：時段字串（"09:00-17:00"）、多時段逗號分隔、"24h"、或 null（當天公休）。
+  openingHours: z.record(z.string(), z.string().nullable()).optional(),
+  openingHoursCheckedAt: z.number().optional(), // epoch ms
 });
 export type SavedPlace = z.infer<typeof savedPlaceSchema>;
 
